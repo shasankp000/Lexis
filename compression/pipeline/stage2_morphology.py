@@ -1,0 +1,237 @@
+"""spaCy-backed morphological analyser with rule-based fallback."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
+from compression.alphabet.morph_codes import (
+    ADVERBIAL,
+    BASE,
+    COMPARATIVE,
+    IRREGULAR,
+    NEGATION,
+    NOMINALIZE,
+    PAST_PART,
+    PAST_TENSE,
+    PLURAL,
+    PRESENT_PART,
+    SUPERLATIVE,
+    THIRD_SING,
+)
+
+_IRREGULAR_ROOT_TO_SURFACE: Dict[str, str] = {
+    "be": "was",
+    "begin": "began",
+    "break": "broke",
+    "come": "came",
+    "do": "did",
+    "drive": "drove",
+    "eat": "ate",
+    "get": "got",
+    "give": "gave",
+    "go": "went",
+    "have": "had",
+    "make": "made",
+    "run": "ran",
+    "say": "said",
+    "see": "saw",
+    "sit": "sat",
+    "speak": "spoke",
+    "take": "took",
+    "write": "wrote",
+}
+_IRREGULAR_SURFACE_TO_ROOT: Dict[str, str] = {
+    surface: root for root, surface in _IRREGULAR_ROOT_TO_SURFACE.items()
+}
+
+
+@dataclass(frozen=True)
+class MorphResult:
+    original: str
+    root: str
+    code: int
+
+
+class MorphologicalAnalyser:
+    """Analyse words into (root, morph_code) pairs."""
+
+    def __init__(self, use_spacy: bool = True) -> None:
+        self.use_spacy = use_spacy
+        self.nlp = None
+        if use_spacy:
+            try:
+                import spacy  # type: ignore
+
+                self.nlp = spacy.load("en_core_web_sm")
+            except Exception:
+                self.nlp = None
+
+    def analyse(self, word: str) -> Tuple[str, int]:
+        """Return (root, morph_code) for a single word."""
+        if not word or word.isspace():
+            return (word, BASE)
+
+        if self.nlp is not None:
+            doc = self.nlp(word)
+            for token in doc:
+                if token.is_space:
+                    continue
+                return self._analyse_token_spacy(token)
+            return (word, BASE)
+
+        return self._analyse_rule_based(word)
+
+    def analyse_sentence(self, sentence: str) -> List[Tuple[str, str, int]]:
+        """Return list of (original_word, root, morph_code) for all words in sentence."""
+        results: List[Tuple[str, str, int]] = []
+        if self.nlp is not None:
+            doc = self.nlp(sentence)
+            for token in doc:
+                if token.is_space:
+                    continue
+                root, code = self._analyse_token_spacy(token)
+                results.append((token.text, root, code))
+            return results
+
+        for raw in sentence.split():
+            root, code = self._analyse_rule_based(raw)
+            results.append((raw, root, code))
+        return results
+
+    def char_savings(self, sentence: str) -> Dict[str, float]:
+        """Return stats: original_chars, root_chars, chars_saved, pct_saved."""
+        results = self.analyse_sentence(sentence)
+        original_chars = sum(len(original) for original, _, _ in results)
+        root_chars = sum(len(root) for _, root, _ in results)
+        chars_saved = original_chars - root_chars
+        pct_saved = (chars_saved / original_chars * 100.0) if original_chars else 0.0
+        return {
+            "original_chars": float(original_chars),
+            "root_chars": float(root_chars),
+            "chars_saved": float(chars_saved),
+            "pct_saved": float(pct_saved),
+        }
+
+    def _analyse_token_spacy(self, token) -> Tuple[str, int]:
+        lower_text = token.text.lower()
+        lemma = token.lemma_.lower() if token.lemma_ else lower_text
+        morph = token.morph
+
+        if lower_text in _IRREGULAR_SURFACE_TO_ROOT:
+            return (_IRREGULAR_SURFACE_TO_ROOT[lower_text], IRREGULAR)
+
+        if lower_text.startswith("un") and lemma == lower_text[2:]:
+            return (lemma, NEGATION)
+
+        if token.pos_ == "ADV" and lower_text.endswith("ly") and lemma != lower_text:
+            return (lemma, ADVERBIAL)
+
+        if (
+            token.tag_ == "VBG"
+            or (
+                token.pos_ in {"VERB", "AUX"}
+                and (
+                    "Aspect=Prog" in morph
+                    or ("VerbForm=Part" in morph and "Tense=Pres" in morph)
+                )
+            )
+            or (
+                token.pos_ in {"VERB", "AUX"}
+                and lower_text.endswith("ing")
+                and lemma != lower_text
+            )
+        ):
+            return (lemma, PRESENT_PART)
+
+        if "Tense=Past" in morph:
+            if token.tag_ == "VBN" or (
+                "VerbForm=Part" in morph and token.tag_ == "VBN"
+            ):
+                return (lemma, PAST_PART)
+            return (lemma, PAST_TENSE)
+
+        if "Number=Plur" in morph:
+            return (lemma, PLURAL)
+
+        if "Degree=Cmp" in morph:
+            return (lemma, COMPARATIVE)
+
+        if "Degree=Sup" in morph:
+            return (lemma, SUPERLATIVE)
+
+        if token.pos_ == "VERB" and "Person=3" in morph and "Number=Sing" in morph:
+            return (lemma, THIRD_SING)
+
+        return (lemma, BASE)
+
+    def _analyse_rule_based(self, word: str) -> Tuple[str, int]:
+        lower = word.lower()
+
+        if lower in _IRREGULAR_SURFACE_TO_ROOT:
+            return (_IRREGULAR_SURFACE_TO_ROOT[lower], IRREGULAR)
+
+        if lower.startswith("un") and len(lower) > 2:
+            return (lower[2:], NEGATION)
+
+        if lower.endswith("ing") and len(lower) > 4:
+            base = lower[:-3]
+            base = _undouble_final_consonant(base)
+            return (base, PRESENT_PART)
+
+        if lower.endswith("ied") and len(lower) > 3:
+            return (lower[:-3] + "y", PAST_TENSE)
+
+        if lower.endswith("ed") and len(lower) > 3:
+            base = lower[:-2]
+            base = _undouble_final_consonant(base)
+            return (base, PAST_TENSE)
+
+        if lower.endswith("ies") and len(lower) > 3:
+            return (lower[:-3] + "y", PLURAL)
+
+        if (
+            lower.endswith("es")
+            and len(lower) > 2
+            and lower[:-2].endswith(("s", "x", "z", "ch", "sh"))
+        ):
+            return (lower[:-2], PLURAL)
+
+        if lower.endswith("s") and len(lower) > 2:
+            return (lower[:-1], PLURAL)
+
+        if lower.endswith("ly") and len(lower) > 3:
+            base = lower[:-2]
+            if base.endswith("i"):
+                base = base[:-1] + "y"
+            return (base, ADVERBIAL)
+
+        if lower.endswith("est") and len(lower) > 4:
+            base = lower[:-3]
+            base = _undouble_final_consonant(base)
+            if base.endswith("i"):
+                base = base[:-1] + "y"
+            return (base, SUPERLATIVE)
+
+        if lower.endswith("er") and len(lower) > 3:
+            base = lower[:-2]
+            base = _undouble_final_consonant(base)
+            if base.endswith("i"):
+                base = base[:-1] + "y"
+            return (base, COMPARATIVE)
+
+        if lower.endswith("ness") and len(lower) > 5:
+            base = lower[:-4]
+            if base.endswith("i"):
+                base = base[:-1] + "y"
+            if base.endswith("e"):
+                base = base[:-1]
+            return (base, NOMINALIZE)
+
+        return (lower, BASE)
+
+
+def _undouble_final_consonant(word: str) -> str:
+    if len(word) >= 2 and word[-1] == word[-2] and word[-1].isalpha():
+        return word[:-1]
+    return word
