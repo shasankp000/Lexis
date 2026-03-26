@@ -19,6 +19,8 @@ from compression.alphabet.morph_codes import (
     SUPERLATIVE,
     THIRD_SING,
 )
+from compression.config import SPACY_MAX_LENGTH, SPACY_MODEL
+from compression.pipeline.utils import chunk_text, split_sentences
 
 _IRREGULAR_ROOT_TO_SURFACE: Dict[str, str] = {
     "be": "was",
@@ -63,7 +65,8 @@ class MorphologicalAnalyser:
             try:
                 import spacy  # type: ignore
 
-                self.nlp = spacy.load("en_core_web_sm")
+                self.nlp = spacy.load(SPACY_MODEL)
+                self.nlp.max_length = SPACY_MAX_LENGTH
             except Exception:
                 self.nlp = None
 
@@ -99,19 +102,40 @@ class MorphologicalAnalyser:
             results.append((raw, root, code))
         return results
 
-    def char_savings(self, sentence: str) -> Dict[str, float]:
-        """Return stats: original_chars, root_chars, chars_saved, pct_saved."""
-        results = self.analyse_sentence(sentence)
-        original_chars = sum(len(original) for original, _, _ in results)
-        root_chars = sum(len(root) for _, root, _ in results)
-        chars_saved = original_chars - root_chars
-        pct_saved = (chars_saved / original_chars * 100.0) if original_chars else 0.0
+    def char_savings(self, text: str) -> Dict[str, float]:
+        """Compute morphological character savings across the full text."""
+        total_original = 0
+        total_root = 0
+
+        for chunk in self._chunk_text(text):
+            for sentence in self._split_sentences(chunk):
+                if not sentence.strip():
+                    continue
+                try:
+                    results = self.analyse_sentence(sentence)
+                    total_original += sum(len(original) for original, _, _ in results)
+                    total_root += sum(len(root) for _, root, _ in results)
+                except Exception:
+                    total_original += len(sentence)
+                    total_root += len(sentence)
+
+        chars_saved = total_original - total_root
+        pct_saved = (chars_saved / total_original * 100.0) if total_original else 0.0
+
         return {
-            "original_chars": float(original_chars),
-            "root_chars": float(root_chars),
+            "original_chars": float(total_original),
+            "root_chars": float(total_root),
             "chars_saved": float(chars_saved),
             "pct_saved": float(pct_saved),
         }
+
+    def _chunk_text(self, text: str, chunk_size: int = 500_000) -> List[str]:
+        """Split text into chunks of ~chunk_size chars, breaking at newlines."""
+        return chunk_text(text, chunk_size)
+
+    def _split_sentences(self, text: str) -> List[str]:
+        """Split text into sentences using a heuristic."""
+        return split_sentences(text)
 
     def _analyse_token_spacy(self, token) -> Tuple[str, int]:
         lower_text = token.text.lower()

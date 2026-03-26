@@ -1,0 +1,9 @@
+compression_test.py:
+  Original :     12,896 bytes  = 8.00 bpb
+  gzip -9  :      4,204 bytes  = 2.6079 bpb
+  zlib -9  :      4,192 bytes  = 2.6005 bpb
+
+moby_dick.txt:
+  Original :  1,276,266 bytes  = 8.00 bpb
+  gzip -9  :    512,115 bytes  = 3.2101 bpb
+  zlib -9  :    512,103 bytes  = 3.2100 bpb

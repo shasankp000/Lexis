@@ -9,15 +9,16 @@ from compression.alphabet.morph_codes import (
     apply_morph,
 )
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
+from compression.config import SPACY_MODEL
 from compression.pipeline.stage2_morphology import MorphologicalAnalyser
 from compression.pipeline.stage3_syntax import analyse_sentence
 from compression.pipeline.stage5_encode import StructuralEncoder
 
 spacy = pytest.importorskip("spacy")
 try:
-    _NLP = spacy.load("en_core_web_sm")
+    _NLP = spacy.load(SPACY_MODEL)
 except Exception:  # pragma: no cover - environment-specific model availability
-    pytest.skip("spaCy model en_core_web_sm not available", allow_module_level=True)
+    pytest.skip(f"spaCy model {SPACY_MODEL} not available", allow_module_level=True)
 
 
 def test_morph_common_inflections():
@@ -106,11 +107,10 @@ def test_structural_round_trip():
     syntax = analyse_sentence(doc)
     encoded = encoder.encode_pos_sequence(syntax.pos_tags)
 
-    pos_ids = encoded["pos_ids"]
-    pos_deltas = encoded["pos_deltas"]
-    first_id = pos_ids[0] if pos_ids else 0
+    encoded_values = encoded["encoded_values"]
+    used_delta = encoded["used_delta"]
 
-    decoded = encoder.decode_pos_sequence(pos_deltas, first_id)
+    decoded = encoder.decode_pos_sequence(encoded_values, used_delta)
     assert decoded == syntax.pos_tags
 
 
