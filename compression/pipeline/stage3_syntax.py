@@ -20,15 +20,20 @@ class SyntaxResult:
 
 def analyse_sentence(doc) -> SyntaxResult:
     """Given a spaCy Doc, return full SyntaxResult."""
-    tokens = [token.text for token in doc if not token.is_space]
-    pos_tags = [token.pos_ for token in doc if not token.is_space]
-    dep_labels = [token.dep_ for token in doc if not token.is_space]
-    tree_shape = serialise_tree_shape(doc)
+    try:
+        sent = next(doc.sents)
+    except Exception:
+        sent = doc
 
-    sentence_text = doc.text.strip()
-    sentence_type = _detect_sentence_type(doc, sentence_text)
-    voice = "PASSIVE" if any(token.dep_ == "auxpass" for token in doc) else "ACTIVE"
-    phrase_boundaries = _extract_phrase_boundaries(doc)
+    tokens = [token.text for token in sent if not token.is_space]
+    pos_tags = [token.pos_ for token in sent if not token.is_space]
+    dep_labels = [token.dep_ for token in sent if not token.is_space]
+    tree_shape = serialise_tree_shape(sent)
+
+    sentence_text = sent.text.strip() if hasattr(sent, "text") else doc.text.strip()
+    sentence_type = _detect_sentence_type(sent, sentence_text)
+    voice = "PASSIVE" if any(token.dep_ == "auxpass" for token in sent) else "ACTIVE"
+    phrase_boundaries = _extract_phrase_boundaries(sent)
 
     return SyntaxResult(
         sentence=sentence_text,
@@ -42,35 +47,35 @@ def analyse_sentence(doc) -> SyntaxResult:
     )
 
 
-def serialise_tree_shape(doc) -> str:
+def serialise_tree_shape(sent) -> str:
     """Return a string encoding only the structural shape of the parse tree."""
-    if not doc:
+    if not sent:
         return "S[]"
 
-    root = None
-    for token in doc:
-        if token.dep_ == "ROOT":
-            root = token
-            break
-    if root is None:
-        root = doc[0]
+    sent_token_indices = {token.i for token in sent}
 
-    children_map = {token: [] for token in doc}
-    for token in doc:
-        if token is root:
-            continue
-        children_map[token.head].append(token)
+    def build_shape(token, visited: set[int]) -> str:
+        if token.i in visited:
+            return "*"
+        visited = visited | {token.i}
 
-    def build_shape(token) -> str:
-        children = children_map.get(token, [])
+        children = [c for c in token.children if c.i in sent_token_indices]
         children.sort(key=lambda t: t.i)
-        label = token.pos_ or token.dep_ or "X"
-        if not children:
-            return label
-        inner = " ".join(build_shape(child) for child in children)
-        return f"{label}[{inner}]"
 
-    return f"S[{build_shape(root)}]"
+        if not children:
+            return token.dep_
+
+        inner = " ".join(build_shape(child, visited) for child in children)
+        return f"{token.dep_}[{inner}]"
+
+    root = sent.root if hasattr(sent, "root") else None
+    if root is None:
+        try:
+            root = next(token for token in sent if token.dep_ == "ROOT")
+        except StopIteration:
+            root = sent[0]
+
+    return f"S[{build_shape(root, set())}]"
 
 
 def get_pos_delta_sequence(pos_tags: List[str], pos_vocab: Dict[str, int]) -> List[int]:

@@ -404,12 +404,13 @@ Using the example sentence **"the old man"**:
 ### Resolved since last session
 - ✅ Complex numbers vs mixed-radix: confirmed they are the same idea from two directions. Complex plane = geometric intuition. Mixed-radix = encoding mechanism. Unified: embed as (class + i·position), encode as separate components.
 - ✅ Delta encoding placement: confirmed beneficial at character level only with phonetic decomposition, not flat alphabet
+- ✅ POS delta encoding tested in Track B with structural encoder metrics
 
 ### Still open
-- Does delta encoding help at the **structural symbol level** (POS sequences, tree shape codes)? — not yet tested
 - How to order structural symbol IDs so common sequential patterns produce small deltas
 - Full formal design of the complete symbol alphabet across all layers
 - Whether the 2.42× character-level improvement survives when combined with the full pipeline
+- Evaluate POS delta improvement on larger, more diverse corpora
 
 ### Complex number / quaternion extension
 - The 3rd component (morphological role) doesn't map onto the 2D complex plane
@@ -426,10 +427,10 @@ Using the example sentence **"the old man"**:
 | Stage 2 — Morphology | ✅ Implemented | spaCy-backed lemmatization + rule-based fallback + savings stats |
 | Stage 3 — Syntax/POS | ✅ Implemented | spaCy POS/dep, tree-shape serialization, sentence type/voice, POS delta |
 | Stage 4 — Discourse | 🟡 Scaffolded | Placeholder analyser returns empty structures |
-| Stage 5 — Symbolic Encoding | ✅ Implemented (character layer) | Phonetic deltas + factoriadic encoding + stats |
-| Stage 6 — Probability Model | 🟡 Implemented (unigram) | Character symbol stream + scoring + payload stats |
-| Stage 7 — ANS/GPU Encoding | 🔲 Not started | Placeholder class only |
-| Stage 8 — Decoding | 🟡 Partial | Morphology and payload decode only |
+| Stage 5 — Symbolic Encoding | ✅ Implemented | Character + structural streams wired (tree shape, POS deltas, meta) |
+| Stage 6 — Probability Model | ✅ Implemented (context-mixing) | 3-level context model + bpb + serialisation |
+| Stage 7 — ANS/GPU Encoding | ✅ Implemented (CPU rANS) | Correct rANS encode/decode + tests; GPU pending |
+| Stage 8 — Decoding | ✅ Implemented | Full decode path + ANS stream reconstruction |
 
 ---
 
@@ -447,14 +448,15 @@ Using the example sentence **"the old man"**:
 2. ✅ ~~Stage 3 POS tagging and syntactic parsing~~ — implemented with spaCy
 3. ✅ ~~POS delta encoding test~~ — added in Track B tests
 4. ✅ ~~Enumerate symbol alphabet~~ — expanded `symbol_alphabet.py`
-5. **Next:** Wire syntax outputs into encoding streams and evaluate on larger corpora
-6. **Next:** Decide structural symbol ID ordering (fixed vs frequency-based)
+5. ✅ ~~Wire syntax outputs into encoding streams~~ — structural encoder integrated in Stage 5
+6. **Next:** Evaluate structural streams on larger corpora
+7. **Next:** Decide structural symbol ID ordering (fixed vs frequency-based)
 
 ### System integration
 1. **Next:** Stage 4 discourse design (coreference + relation tagging decisions)
-2. **Next:** Stage 6 upgrade from unigram to context model
-3. **Next:** Stage 7 ANS (CPU first or GPU)
-4. **Next:** Stage 8 full decode path across all stages
+2. **Next:** GPU ANS implementation or CUDA acceleration strategy
+3. **Next:** Finalize interleaved stream layout for binary payload format
+4. **Next:** End-to-end compression benchmarking on FineWeb
 
 ### Hardware note
 Local environment (Nobara Linux, RTX 3060 12GB, Ryzen 5 4600G, 16GB DDR4) is ready for:

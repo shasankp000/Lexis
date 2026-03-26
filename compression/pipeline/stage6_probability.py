@@ -10,6 +10,23 @@ from typing import Dict, Iterable, List, cast
 import msgpack
 
 
+def _prepare_for_pack(data: dict) -> dict:
+    """Recursively convert integer keys to strings for msgpack compatibility."""
+    return {
+        str(k): (_prepare_for_pack(v) if isinstance(v, dict) else v)
+        for k, v in data.items()
+    }
+
+
+def _restore_from_pack(data: dict) -> dict:
+    """Recursively restore string keys to integers after msgpack unpack."""
+    result = {}
+    for k, v in data.items():
+        int_key = int(k) if isinstance(k, str) and k.lstrip("-").isdigit() else k
+        result[int_key] = _restore_from_pack(v) if isinstance(v, dict) else v
+    return result
+
+
 def bits_for_symbol(prob: float) -> float:
     return -math.log2(prob)
 
@@ -177,23 +194,28 @@ class ContextMixingModel:
             "morph_vocab": self.morph_vocab,
             "pos_vocab": self.pos_vocab,
         }
-        packed = msgpack.packb(payload, use_bin_type=True)
+        prepared = _prepare_for_pack(payload)
+        packed = msgpack.packb(prepared, use_bin_type=True)
         packed_bytes = cast(bytes, packed)
         Path(path).write_bytes(packed_bytes)
         return len(packed_bytes)
 
     def load(self, path: str) -> None:
         """Load model from binary file saved by serialise()."""
-        data = msgpack.unpackb(Path(path).read_bytes(), raw=False)
+        data = msgpack.unpackb(Path(path).read_bytes(), raw=False, strict_map_key=False)
         self.char_context = defaultdict(Counter)
         self.morph_context = defaultdict(Counter)
         self.struct_context = defaultdict(Counter)
 
-        for key, counter in data.get("char_context", {}).items():
+        char_context = _restore_from_pack(data.get("char_context", {}))
+        morph_context = _restore_from_pack(data.get("morph_context", {}))
+        struct_context = _restore_from_pack(data.get("struct_context", {}))
+
+        for key, counter in char_context.items():
             self.char_context[int(key)] = Counter(counter)
-        for key, counter in data.get("morph_context", {}).items():
+        for key, counter in morph_context.items():
             self.morph_context[int(key)] = Counter(counter)
-        for key, counter in data.get("struct_context", {}).items():
+        for key, counter in struct_context.items():
             self.struct_context[str(key)] = Counter(counter)
 
         self.weights = list(data.get("weights", [1 / 3, 1 / 3, 1 / 3]))

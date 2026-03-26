@@ -1,0 +1,78 @@
+··• python main.py analyse compression_test.py
+POS delta test: flat=1.1250 delta=1.0667 ratio=1.055 -> DELTA HELPS
+POS delta test: flat=2.2000 delta=0.7500 ratio=2.933 -> DELTA HELPS
+POS delta test: flat=2.5000 delta=4.3333 ratio=0.577 -> DELTA DOES NOT HELP
+POS delta test: flat=4.1429 delta=4.2308 ratio=0.979 -> DELTA DOES NOT HELP
+POS delta test: flat=1.9873 delta=0.8602 ratio=2.310 -> DELTA HELPS
+POS delta test: flat=7.7200 delta=7.9583 ratio=0.970 -> DELTA DOES NOT HELP
+POS delta test: flat=3.0000 delta=0.0000 ratio=0.000 -> DELTA HELPS
+POS delta test: flat=8.2000 delta=5.6842 ratio=1.443 -> DELTA HELPS
+POS delta test: flat=6.4545 delta=5.2857 ratio=1.221 -> DELTA HELPS
+POS delta test: flat=3.0000 delta=4.0476 ratio=0.741 -> DELTA DOES NOT HELP
+POS delta test: flat=4.5000 delta=5.8696 ratio=0.767 -> DELTA DOES NOT HELP
+POS delta test: flat=3.0870 delta=2.3182 ratio=1.332 -> DELTA HELPS
+POS delta test: flat=6.1074 delta=6.6750 ratio=0.915 -> DELTA DOES NOT HELP
+POS delta test: flat=2.9091 delta=2.6000 ratio=1.119 -> DELTA HELPS
+POS delta test: flat=6.0513 delta=6.8421 ratio=0.884 -> DELTA DOES NOT HELP
+POS delta test: flat=3.7500 delta=4.3133 ratio=0.869 -> DELTA DOES NOT HELP
+POS delta test: flat=7.1111 delta=5.2353 ratio=1.358 -> DELTA HELPS
+POS delta test: flat=6.1205 delta=5.8780 ratio=1.041 -> DELTA HELPS
+POS delta test: flat=3.7273 delta=3.9000 ratio=0.956 -> DELTA DOES NOT HELP
+POS delta test: flat=5.4444 delta=5.4125 ratio=1.006 -> DELTA HELPS
+POS delta test: flat=3.0303 delta=4.3438 ratio=0.698 -> DELTA DOES NOT HELP
+POS delta test: flat=2.4902 delta=3.1800 ratio=0.783 -> DELTA DOES NOT HELP
+POS delta test: flat=4.3889 delta=5.6224 ratio=0.781 -> DELTA DOES NOT HELP
+POS delta test: flat=2.0069 delta=1.8112 ratio=1.108 -> DELTA HELPS
+POS delta test: flat=3.0000 delta=0.0000 ratio=0.000 -> DELTA HELPS
+POS delta test: flat=8.4091 delta=6.6667 ratio=1.261 -> DELTA HELPS
+POS delta test: flat=5.2917 delta=4.4783 ratio=1.182 -> DELTA HELPS
+POS delta test: flat=4.3846 delta=2.4167 ratio=1.814 -> DELTA HELPS
+POS delta test: flat=4.0645 delta=4.3934 ratio=0.925 -> DELTA DOES NOT HELP
+POS delta test: flat=2.9000 delta=4.1837 ratio=0.693 -> DELTA DOES NOT HELP
+POS delta test: flat=6.4667 delta=7.3571 ratio=0.879 -> DELTA DOES NOT HELP
+POS delta test: flat=3.7727 delta=3.5814 ratio=1.053 -> DELTA HELPS
+POS delta test: flat=6.3333 delta=5.0000 ratio=1.267 -> DELTA HELPS
+POS delta test: flat=3.7378 delta=4.2277 ratio=0.884 -> DELTA DOES NOT HELP
+POS delta test: flat=3.6500 delta=6.0526 ratio=0.603 -> DELTA DOES NOT HELP
+POS delta test: flat=4.8571 delta=4.1000 ratio=1.185 -> DELTA HELPS
+POS delta test: flat=5.8974 delta=6.6579 ratio=0.886 -> DELTA DOES NOT HELP
+POS delta test: flat=3.0000 delta=5.3333 ratio=0.562 -> DELTA DOES NOT HELP
+POS delta test: flat=2.0381 delta=2.0957 ratio=0.973 -> DELTA DOES NOT HELP
+POS delta test: flat=5.3750 delta=3.5714 ratio=1.505 -> DELTA HELPS
+POS delta test: flat=4.6667 delta=4.8182 ratio=0.969 -> DELTA DOES NOT HELP
+POS delta test: flat=3.0000 delta=0.0000 ratio=0.000 -> DELTA HELPS
+POS delta test: flat=7.2308 delta=5.2500 ratio=1.377 -> DELTA HELPS
+POS delta test: flat=4.4615 delta=3.0833 ratio=1.447 -> DELTA HELPS
+POS delta test: flat=5.0370 delta=5.9615 ratio=0.845 -> DELTA DOES NOT HELP
+POS delta test: flat=4.6129 delta=5.9333 ratio=0.777 -> DELTA DOES NOT HELP
+POS delta test: flat=5.2222 delta=2.1250 ratio=2.458 -> DELTA HELPS
+POS delta test: flat=4.2308 delta=3.7500 ratio=1.128 -> DELTA HELPS
+POS delta test: flat=6.3333 delta=5.0000 ratio=1.267 -> DELTA HELPS
+POS delta test: flat=4.2793 delta=4.7909 ratio=0.893 -> DELTA DOES NOT HELP
+POS delta test: flat=2.7500 delta=3.6047 ratio=0.763 -> DELTA DOES NOT HELP
+POS delta test: flat=2.8514 delta=3.3303 ratio=0.856 -> DELTA DOES NOT HELP
+POS delta test: flat=3.4000 delta=3.0294 ratio=1.122 -> DELTA HELPS
+POS delta test: flat=6.1667 delta=5.9512 ratio=1.036 -> DELTA HELPS
+POS delta test: flat=8.7273 delta=6.1000 ratio=1.431 -> DELTA HELPS
+POS delta test: flat=0.0000 delta=0.0000 ratio=0.000 -> DELTA DOES NOT HELP
+Context-mixing bpb: 2.3217
+Stage 2 — Morphology
+  original_chars: 9183.0
+  root_chars: 8966.0
+  chars_saved: 217.0
+  pct_saved: 2.363062180115431
+Stage 5 — Character Encoding
+  mean_class_delta: 1.899905019361438
+  mean_pos_delta: 1.6977423832834075
+  mean_role_delta: 0.5400745232702564
+  mean_flat_delta: 12.779352670417184
+  mean_decomp_magnitude: 3.0077469913488755
+  improvement_ratio: 4.248812385873609
+Stage 6 — Probability Model (Context Mixing)
+  bpb: 2.3217408726253286
+  char_vocab_size: 7
+  morph_vocab_size: 9
+  pos_vocab_size: 16
+  char_context_size: 7
+  morph_context_size: 9
+  struct_context_size: 16

@@ -16,7 +16,7 @@ from compression.alphabet.symbol_alphabet import SymbolAlphabet
 from compression.pipeline.stage3_syntax import SyntaxResult
 
 
-def encode_factoradic(value: int) -> List[int]:
+def _encode_factoradic_unsigned(value: int) -> List[int]:
     """Encode a non-negative integer into factoriadic digits."""
     if value < 0:
         raise ValueError("value must be non-negative")
@@ -32,8 +32,8 @@ def encode_factoradic(value: int) -> List[int]:
     return list(reversed(digits))
 
 
-def decode_factoradic(digits: List[int]) -> int:
-    """Decode factoriadic digits into an integer."""
+def _decode_factoradic_unsigned(digits: List[int]) -> int:
+    """Decode factoriadic digits into a non-negative integer."""
     if not digits:
         return 0
     total = 0
@@ -41,6 +41,24 @@ def decode_factoradic(digits: List[int]) -> int:
     for idx, digit in enumerate(digits):
         total += digit * factorial(length - 1 - idx)
     return total
+
+
+def encode_factoradic(value: int) -> List[int]:
+    """Encode any integer into signed factoriadic digits."""
+    if value < 0:
+        digits = _encode_factoradic_unsigned(abs(value))
+        return [-1] + digits
+    return _encode_factoradic_unsigned(value)
+
+
+def decode_factoradic(digits: List[int]) -> int:
+    """Decode signed factoriadic digits into an integer."""
+    if not digits:
+        raise ValueError("empty digits list")
+    if digits[0] < 0:
+        value = _decode_factoradic_unsigned(digits[1:])
+        return -value
+    return _decode_factoradic_unsigned(digits)
 
 
 def _cumulative_from_deltas(deltas: List[int]) -> List[int]:

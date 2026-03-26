@@ -1,1 +1,5 @@
 copilot*.md
+__pycache__
+compression/__pycache__/
+compression/pipeline/__pycache__/
+.pytest_cache
