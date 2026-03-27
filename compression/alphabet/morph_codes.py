@@ -61,9 +61,32 @@ _CODE_TO_PTB: Dict[int, str | None] = {
 }
 
 _DECODE_OVERRIDES: Dict[str, str] = {
+    # be-verb ambiguities (lemminflect returns "was" for all be/VBD)
     "are": "are",
     "were": "were",
     "been": "been",
+    # Accusative pronouns
+    "me": "me",
+    "him": "him",
+    "her": "her",
+    "us": "us",
+    "them": "them",
+    # Possessive pronouns
+    "my": "my",
+    "his": "his",
+    "its": "its",
+    "our": "our",
+    "their": "their",
+    "your": "your",
+    # Reflexive pronouns
+    "myself": "myself",
+    "himself": "himself",
+    "herself": "herself",
+    "itself": "itself",
+    "ourselves": "ourselves",
+    "themselves": "themselves",
+    "yourself": "yourself",
+    "yourselves": "yourselves",
 }
 
 
