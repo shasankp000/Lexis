@@ -34,9 +34,11 @@ _IRREGULAR_ROOT_TO_SURFACE: Dict[str, str] = {
     "give": "gave",
     "go": "went",
     "have": "had",
+    "leave": "left",
     "make": "made",
     "run": "ran",
     "say": "said",
+    "swim": "swam",
     "see": "saw",
     "sit": "sat",
     "speak": "spoke",
@@ -44,7 +46,29 @@ _IRREGULAR_ROOT_TO_SURFACE: Dict[str, str] = {
     "write": "wrote",
 }
 _IRREGULAR_SURFACE_TO_ROOT: Dict[str, str] = {
-    surface: root for root, surface in _IRREGULAR_ROOT_TO_SURFACE.items()
+    **{surface: root for root, surface in _IRREGULAR_ROOT_TO_SURFACE.items()},
+    "are": "are",
+    "were": "were",
+    "been": "been",
+    "me": "me",
+    "him": "him",
+    "her": "her",
+    "us": "us",
+    "them": "them",
+    "my": "my",
+    "his": "his",
+    "its": "its",
+    "our": "our",
+    "their": "their",
+    "your": "your",
+    "myself": "myself",
+    "himself": "himself",
+    "herself": "herself",
+    "itself": "itself",
+    "ourselves": "ourselves",
+    "themselves": "themselves",
+    "yourself": "yourself",
+    "yourselves": "yourselves",
 }
 
 
@@ -176,6 +200,12 @@ class MorphologicalAnalyser:
                 return (lemma, PAST_PART)
             return (lemma, PAST_TENSE)
 
+        if token.pos_ == "PRON":
+            return (lower_text, BASE)
+
+        if token.pos_ == "NUM":
+            return (lemma, BASE)
+
         if "Number=Plur" in morph:
             return (lemma, PLURAL)
 
@@ -185,7 +215,11 @@ class MorphologicalAnalyser:
         if "Degree=Sup" in morph:
             return (lemma, SUPERLATIVE)
 
-        if token.pos_ == "VERB" and "Person=3" in morph and "Number=Sing" in morph:
+        if (
+            token.pos_ in {"VERB", "AUX"}
+            and "Person=3" in morph
+            and "Number=Sing" in morph
+        ):
             return (lemma, THIRD_SING)
 
         return (lemma, BASE)

@@ -44,6 +44,61 @@ PHONETIC_CLASSES: dict[str, tuple[int, int]] = {
     ".": (6, 3),  # punctuation (normalised)
 }
 
+_PUNCTUATION_CHARS = [
+    ",",
+    ";",
+    ":",
+    "!",
+    "?",
+    "-",
+    "'",
+    '"',
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    "/",
+    "\\",
+    "@",
+    "#",
+    "$",
+    "%",
+    "&",
+    "*",
+    "+",
+    "=",
+    "<",
+    ">",
+    "~",
+    "|",
+    "`",
+]
+
+_DIGIT_CHARS = [
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+]
+
+_punct_start = max(pos for ch, (cls, pos) in PHONETIC_CLASSES.items() if cls == 5) + 1
+for offset, ch in enumerate(_PUNCTUATION_CHARS):
+    if ch not in PHONETIC_CLASSES:
+        PHONETIC_CLASSES[ch] = (5, _punct_start + offset)
+
+_digit_start = _punct_start + len(_PUNCTUATION_CHARS)
+for offset, ch in enumerate(_DIGIT_CHARS):
+    if ch not in PHONETIC_CLASSES:
+        PHONETIC_CLASSES[ch] = (5, _digit_start + offset)
+
 MORPH_ROLES: dict[str, int] = {
     "start": 0,  # first character of a word (follows ^)
     "middle": 1,  # interior character

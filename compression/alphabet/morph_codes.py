@@ -5,6 +5,14 @@ from __future__ import annotations
 from math import factorial
 from typing import Dict, List
 
+try:
+    import lemminflect as _lemminflect  # type: ignore[import-not-found]
+
+    _LEMMINFLECT_AVAILABLE = True
+except ImportError:
+    _lemminflect = None
+    _LEMMINFLECT_AVAILABLE = False
+
 MORPH_CODES: Dict[str, int] = {
     "BASE": 0,  # no transformation
     "PLURAL": 1,  # dogs → dog
@@ -37,26 +45,25 @@ AGENT = MORPH_CODES["AGENT"]
 NOMINALIZE = MORPH_CODES["NOMINALIZE"]
 IRREGULAR = MORPH_CODES["IRREGULAR"]
 
-_IRREGULAR_FORMS: Dict[str, str] = {
-    "be": "was",
-    "begin": "began",
-    "break": "broke",
-    "come": "came",
-    "do": "did",
-    "drive": "drove",
-    "eat": "ate",
-    "get": "got",
-    "give": "gave",
-    "go": "went",
-    "have": "had",
-    "make": "made",
-    "run": "ran",
-    "say": "said",
-    "see": "saw",
-    "sit": "sat",
-    "speak": "spoke",
-    "take": "took",
-    "write": "wrote",
+# Must be after PLURAL, PAST_TENSE etc. are defined
+_CODE_TO_PTB: Dict[int, str | None] = {
+    PLURAL: "NNS",
+    PAST_TENSE: "VBD",
+    PRESENT_PART: "VBG",
+    PAST_PART: "VBN",
+    THIRD_SING: "VBZ",
+    COMPARATIVE: "JJR",
+    SUPERLATIVE: "JJS",
+    ADVERBIAL: "RB",
+    NEGATION: None,
+    AGENT: None,
+    NOMINALIZE: None,
+}
+
+_DECODE_OVERRIDES: Dict[str, str] = {
+    "are": "are",
+    "were": "were",
+    "been": "been",
 }
 
 
@@ -70,37 +77,48 @@ def decode_morph(digits: List[int]) -> int:
     return _decode_factoradic(digits)
 
 
-def apply_morph(root: str, code: int) -> str:
-    """Reconstruct surface form from root + morph code.
+def _inflect(root: str, ptb_tag: str) -> str | None:
+    """Return the inflected form of root for the given PTB tag, or None."""
+    if not _LEMMINFLECT_AVAILABLE or _lemminflect is None:
+        return None
+    forms = _lemminflect.getInflection(root, tag=ptb_tag)  # type: ignore[attr-defined]
+    return forms[0] if forms else None
 
-    This is the DECODE direction — used in Stage 8.
-    """
+
+def apply_morph(root: str, code: int) -> str:
+    """Reconstruct surface form from root + morph code (decode direction)."""
     if code == BASE:
         return root
+
     if code == IRREGULAR:
-        return _IRREGULAR_FORMS.get(root, root)
+        if root in _DECODE_OVERRIDES:
+            return _DECODE_OVERRIDES[root]
+        result = _inflect(root, "VBD")
+        return result if result else root
+
     if code == NEGATION:
+        if root.startswith("un"):
+            return root
         return f"un{root}"
-    if code == PLURAL:
-        return _pluralize(root)
-    if code == THIRD_SING:
-        return _pluralize(root)
-    if code == PAST_TENSE:
-        return _past_tense(root)
-    if code == PAST_PART:
-        return _past_tense(root)
-    if code == PRESENT_PART:
-        return _present_participle(root)
-    if code == COMPARATIVE:
-        return _comparative(root)
-    if code == SUPERLATIVE:
-        return _superlative(root)
-    if code == ADVERBIAL:
-        return _adverbial(root)
+
     if code == AGENT:
-        return _agentive(root)
+        if root.endswith("e"):
+            return root + "r"
+        return root + "er"
+
     if code == NOMINALIZE:
-        return _nominalize(root)
+        if root.endswith("y"):
+            return root[:-1] + "iness"
+        if root.endswith("e"):
+            return root[:-1] + "eness"
+        return root + "ness"
+
+    ptb_tag = _CODE_TO_PTB.get(code)
+    if ptb_tag:
+        result = _inflect(root, ptb_tag)
+        if result:
+            return result
+
     return root
 
 
@@ -128,98 +146,3 @@ def _decode_factoradic(digits: List[int]) -> int:
         weight = factorial(length - 1 - idx)
         total += digit * weight
     return total
-
-
-def _is_vowel(char: str) -> bool:
-    return char.lower() in {"a", "e", "i", "o", "u"}
-
-
-def _is_consonant(char: str) -> bool:
-    return char.isalpha() and not _is_vowel(char)
-
-
-def _ends_with_cvc(word: str) -> bool:
-    if len(word) < 3:
-        return False
-    c1, c2, c3 = word[-3], word[-2], word[-1]
-    return (
-        _is_consonant(c1)
-        and _is_vowel(c2)
-        and _is_consonant(c3)
-        and c3.lower() not in {"w", "x", "y"}
-    )
-
-
-def _pluralize(root: str) -> str:
-    lower = root.lower()
-    if lower.endswith(("s", "x", "z", "ch", "sh")):
-        return root + "es"
-    if lower.endswith("y") and len(root) > 1 and _is_consonant(root[-2]):
-        return root[:-1] + "ies"
-    return root + "s"
-
-
-def _past_tense(root: str) -> str:
-    lower = root.lower()
-    if lower.endswith("e"):
-        return root + "d"
-    if lower.endswith("y") and len(root) > 1 and _is_consonant(root[-2]):
-        return root[:-1] + "ied"
-    if _ends_with_cvc(root):
-        return root + root[-1] + "ed"
-    return root + "ed"
-
-
-def _present_participle(root: str) -> str:
-    lower = root.lower()
-    if lower.endswith("ie"):
-        return root[:-2] + "ying"
-    if lower.endswith("e") and not lower.endswith(("ee", "oe", "ye")):
-        return root[:-1] + "ing"
-    if _ends_with_cvc(root):
-        return root + root[-1] + "ing"
-    return root + "ing"
-
-
-def _comparative(root: str) -> str:
-    lower = root.lower()
-    if lower.endswith("y") and len(root) > 1 and _is_consonant(root[-2]):
-        return root[:-1] + "ier"
-    if lower.endswith("e"):
-        return root + "r"
-    if _ends_with_cvc(root):
-        return root + root[-1] + "er"
-    return root + "er"
-
-
-def _superlative(root: str) -> str:
-    lower = root.lower()
-    if lower.endswith("y") and len(root) > 1 and _is_consonant(root[-2]):
-        return root[:-1] + "iest"
-    if lower.endswith("e"):
-        return root + "st"
-    if _ends_with_cvc(root):
-        return root + root[-1] + "est"
-    return root + "est"
-
-
-def _adverbial(root: str) -> str:
-    lower = root.lower()
-    if lower.endswith("y") and len(root) > 1 and _is_consonant(root[-2]):
-        return root[:-1] + "ily"
-    if lower.endswith("le") and len(root) > 2 and _is_consonant(root[-3]):
-        return root[:-2] + "ly"
-    return root + "ly"
-
-
-def _agentive(root: str) -> str:
-    return _comparative(root)
-
-
-def _nominalize(root: str) -> str:
-    lower = root.lower()
-    if lower.endswith("y") and len(root) > 1 and _is_consonant(root[-2]):
-        return root[:-1] + "iness"
-    if lower.endswith("e"):
-        return root[:-1] + "eness"
-    return root + "ness"

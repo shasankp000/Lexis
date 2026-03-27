@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, List, cast
+
+import msgpack
 
 try:
     from tqdm import tqdm  # type: ignore
@@ -17,6 +20,7 @@ except Exception:
 
 
 from compression.alphabet.morph_codes import apply_morph
+from compression.alphabet.phonetic_map import PHONETIC_CLASSES
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
 from compression.config import (
     CHAR_CONTEXT_SIZE,
@@ -30,6 +34,7 @@ from compression.pipeline.stage2_morphology import MorphologicalAnalyser
 from compression.pipeline.stage3_syntax import analyse_sentence
 from compression.pipeline.stage5_encode import CharacterEncoder, StructuralEncoder
 from compression.pipeline.stage6_probability import ContextMixingModel
+from compression.pipeline.stage7_arithmetic import ArithmeticDecoder, ArithmeticEncoder
 from compression.pipeline.utils import chunk_text
 
 
@@ -131,6 +136,188 @@ class _EncodedPipeline:
         return self._encoded_sentences
 
 
+def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
+    if not deltas:
+        return []
+    values = [deltas[0]]
+    for delta in deltas[1:]:
+        values.append(values[-1] + delta)
+    return values
+
+
+def _reconstruct_chars(
+    class_stream: List[int],
+    pos_deltas: List[int],
+    sentence_char_counts: List[int],
+) -> str:
+    inverse_map = {coords: char for char, coords in PHONETIC_CLASSES.items()}
+    chars: List[str] = []
+    idx = 0
+
+    for count in sentence_char_counts:
+        segment_classes = class_stream[idx : idx + count]
+        segment_deltas = pos_deltas[idx : idx + count]
+        positions = _cumulative_from_deltas(segment_deltas)
+        for cls, pos in zip(segment_classes, positions):
+            char = inverse_map.get((cls, pos))
+            if char is not None:
+                chars.append(char)
+            elif cls == 6:
+                chars.append("_")
+        idx += count
+
+    if idx < len(class_stream):
+        segment_classes = class_stream[idx:]
+        segment_deltas = pos_deltas[idx:]
+        positions = _cumulative_from_deltas(segment_deltas)
+        for cls, pos in zip(segment_classes, positions):
+            char = inverse_map.get((cls, pos))
+            if char is not None:
+                chars.append(char)
+            elif cls == 6:
+                chars.append("_")
+
+    return "".join(chars)
+
+
+def _split_roots(char_stream: str) -> List[str]:
+    roots: List[str] = []
+    current: List[str] = []
+    for char in char_stream:
+        if char == "^":
+            current = []
+        elif char == "$":
+            if current:
+                roots.append("".join(current))
+            current = []
+        elif char == "_":
+            continue
+        else:
+            current.append(char)
+    if current:
+        roots.append("".join(current))
+    return roots
+
+
+def _flatten(nested: List[List[Any]]) -> List[Any]:
+    return [item for sub in nested for item in sub]
+
+
+_ATTACH_LEFT = set(".,;:!?)'\"-—%-/")
+_ATTACH_RIGHT = set("(\"'$#/")
+
+
+def _join_words(words: list[str]) -> str:
+    """Join tokens intelligently, suppressing spaces around punctuation."""
+    if not words:
+        return ""
+
+    parts: list[str] = [words[0]]
+    for word in words[1:]:
+        if not word:
+            continue
+        # If previous token ended with asterisk, attach consecutive asterisks (***)
+        if word == "*":
+            if parts[-1].endswith("*"):
+                parts[-1] += word
+            else:
+                parts.append(" " + word)
+            continue
+        # If previous token ended with hyphen/slash, attach next word directly
+        if parts[-1].endswith(("-", "/")):
+            parts[-1] += word
+            continue
+        # If previous token ends with a right-attaching opener (e.g., "(", "#")
+        if parts[-1] and parts[-1][-1] in _ATTACH_RIGHT:
+            parts[-1] += word
+            continue
+        first_char = word[0]
+        if first_char == "'":
+            parts[-1] += word
+        elif first_char in _ATTACH_LEFT:
+            parts[-1] += word
+        else:
+            parts.append(" " + word)
+
+    result = "".join(parts)
+    result = result.replace("( ", "(").replace(" )", ")")
+    result = result.replace("[ ", "[").replace(" ]", "]")
+    result = result.replace(" — ", "—")
+    return result.strip()
+
+
+def _build_context_model(payload: Dict[str, Any]) -> ContextMixingModel:
+    model = ContextMixingModel()
+    char_context = defaultdict(Counter)
+    morph_context = defaultdict(Counter)
+    struct_context = defaultdict(Counter)
+
+    for key, counter in payload.get("char_context", {}).items():
+        char_context[int(key)] = Counter(
+            {int(k): int(v) for k, v in dict(counter).items()}
+        )
+    for key, counter in payload.get("morph_context", {}).items():
+        morph_context[int(key)] = Counter(
+            {int(k): int(v) for k, v in dict(counter).items()}
+        )
+    for key, counter in payload.get("struct_context", {}).items():
+        struct_context[str(key)] = Counter(
+            {int(k): int(v) for k, v in dict(counter).items()}
+        )
+
+    model.char_context = char_context
+    model.morph_context = morph_context
+    model.struct_context = struct_context
+    model.weights = list(payload.get("model_weights", model.weights))
+    model.char_vocab = [int(v) for v in payload.get("char_vocab", model.char_vocab)]
+    model.morph_vocab = [int(v) for v in payload.get("morph_vocab", model.morph_vocab)]
+    model.pos_vocab = [str(v) for v in payload.get("pos_vocab", model.pos_vocab)]
+    return model
+
+
+def _build_encoded_sentences_from_metadata(payload: Dict[str, Any]) -> List[Dict]:
+    root_lengths = payload.get("root_lengths", [])
+    pos_bits = payload.get("pos_huffman_bits", [])
+    pos_n_tags = payload.get("pos_n_tags", [])
+    pos_tags = payload.get("pos_tags", [])
+    morph_codes = payload.get("morph_codes", [])
+
+    encoded: List[Dict] = []
+    for idx, lengths in enumerate(root_lengths):
+        sentence_pos = pos_tags[idx] if idx < len(pos_tags) else []
+        sentence_morph = morph_codes[idx] if idx < len(morph_codes) else []
+        char_pos_tags: List[str] = []
+        char_morph_codes: List[int] = []
+
+        for token_idx, length in enumerate(lengths):
+            pos_tag = sentence_pos[token_idx] if token_idx < len(sentence_pos) else "X"
+            morph_code = (
+                sentence_morph[token_idx] if token_idx < len(sentence_morph) else 0
+            )
+            char_pos_tags.append("X")
+            char_morph_codes.append(0)
+            char_pos_tags.extend([pos_tag] * length)
+            char_morph_codes.extend([morph_code] * length)
+            char_pos_tags.append("X")
+            char_morph_codes.append(0)
+            if token_idx < len(lengths) - 1:
+                char_pos_tags.append("X")
+                char_morph_codes.append(0)
+
+        encoded.append(
+            {
+                "char_morph_codes": char_morph_codes,
+                "char_pos_tags": char_pos_tags,
+                "pos_huffman_bits": float(pos_bits[idx])
+                if idx < len(pos_bits)
+                else 0.0,
+                "pos_n_tags": int(pos_n_tags[idx]) if idx < len(pos_n_tags) else 0,
+                "pos_tags": sentence_pos,
+            }
+        )
+    return encoded
+
+
 def compress(text: str, output_path: str, model: str | None = None) -> Dict:
     """Run full available pipeline on text. Return stats."""
     normalized = normalize_text(text)
@@ -170,14 +357,139 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
     return payload
 
 
+def compress_to_file(text: str, output_path: str, model: str | None = None) -> Dict:
+    """
+    Full compression pipeline with arithmetic coding.
+    """
+    normalized = normalize_text(text)
+    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
+
+    context_model = ContextMixingModel()
+    context_model.train(encoded_sentences)
+
+    char_classes: List[int] = []
+    char_pos_deltas: List[int] = []
+    sentence_char_counts: List[int] = []
+    pos_huffman_bits: List[float] = []
+    pos_n_tags: List[int] = []
+    pos_tags: List[List[str]] = []
+    morph_codes: List[List[int]] = []
+    root_lengths: List[List[int]] = []
+
+    for sentence in encoded_sentences:
+        char_classes.extend(sentence.get("char_classes", []))
+        char_pos_deltas.extend(sentence.get("pos_deltas", []))
+        sentence_char_counts.append(len(sentence.get("char_classes", [])))
+        pos_huffman_bits.append(float(sentence.get("pos_huffman_bits", 0.0)))
+        pos_n_tags.append(int(sentence.get("pos_n_tags", 0)))
+        pos_tags.append(sentence.get("pos_tags", []))
+        morph_codes.append(sentence.get("morph_codes", []))
+        root_lengths.append([len(root) for root in sentence.get("roots", [])])
+
+    encoder = ArithmeticEncoder()
+    compressed_bytes = encoder.encode(
+        char_classes, context_model, {}, encoded_sentences
+    )
+
+    pos_delta_counts = Counter(char_pos_deltas)
+    pos_deltas_stream = encoder.encode_unigram_counts(char_pos_deltas, pos_delta_counts)
+
+    metadata = {
+        "compressed_bitstream": compressed_bytes,
+        "pos_deltas_bitstream": pos_deltas_stream,
+        "pos_deltas_counts": {int(k): int(v) for k, v in pos_delta_counts.items()},
+        "pos_deltas_count": len(char_pos_deltas),
+        "sentence_char_counts": sentence_char_counts,
+        "pos_huffman_bits": pos_huffman_bits,
+        "pos_n_tags": pos_n_tags,
+        "pos_tags": pos_tags,
+        "morph_codes": morph_codes,
+        "root_lengths": root_lengths,
+        "model_weights": context_model.weights,
+        "char_context": {
+            int(k): dict(v) for k, v in context_model.char_context.items()
+        },
+        "morph_context": {
+            int(k): dict(v) for k, v in context_model.morph_context.items()
+        },
+        "struct_context": {
+            str(k): dict(v) for k, v in context_model.struct_context.items()
+        },
+        "char_vocab": context_model.char_vocab,
+        "morph_vocab": context_model.morph_vocab,
+        "pos_vocab": context_model.pos_vocab,
+        "num_symbols": len(char_classes),
+        "num_char_classes": 7,
+        "huffman_codes": encoded_sentences[0].get("pos_huffman_codes", {})
+        if encoded_sentences
+        else {},
+        "pos_freq_table": pos_freq_table,
+    }
+
+    packed = msgpack.packb(metadata, use_bin_type=True)
+    packed_bytes = cast(bytes, packed)
+    Path(output_path).write_bytes(packed_bytes)
+
+    original_size = len(text.encode("utf-8"))
+    compressed_size = len(compressed_bytes)
+    return {
+        "original_size": original_size,
+        "compressed_size": compressed_size,
+        "compression_ratio": compressed_size / original_size if original_size else 0.0,
+        "bpb": (compressed_size * 8) / original_size if original_size else 0.0,
+    }
+
+
 def decompress(input_path: str) -> str:
-    """Reconstruct text from compressed file."""
-    payload = json.loads(Path(input_path).read_text())
-    words = [
-        apply_morph(entry["root"], entry["code"])
-        for entry in payload.get("morphology", [])
-    ]
-    return " ".join(words)
+    """Decompress arithmetic-coded or JSON payloads."""
+    raw = Path(input_path).read_bytes()
+    payload: Dict[str, Any]
+    try:
+        payload = msgpack.unpackb(raw, raw=False, strict_map_key=False)
+    except Exception:
+        payload = json.loads(raw.decode("utf-8"))
+
+    if isinstance(payload, dict) and "compressed_bitstream" in payload:
+        context_model = _build_context_model(payload)
+        encoded_sentences = _build_encoded_sentences_from_metadata(payload)
+
+        decoder = ArithmeticDecoder()
+        num_symbols = int(
+            payload.get("num_symbols", len(payload.get("char_morph_codes", [])))
+        )
+        char_classes = decoder.decode(
+            payload["compressed_bitstream"],
+            context_model,
+            encoded_sentences,
+            num_symbols,
+        )
+
+        pos_deltas_stream = payload.get("pos_deltas_bitstream", b"")
+        pos_deltas_counts = payload.get("pos_deltas_counts", {})
+        pos_deltas_count = int(payload.get("pos_deltas_count", 0))
+        counts = {int(k): int(v) for k, v in pos_deltas_counts.items()}
+        pos_deltas = ArithmeticDecoder().decode_unigram_counts(
+            bytes(pos_deltas_stream), counts, pos_deltas_count
+        )
+        sentence_counts = [int(c) for c in payload.get("sentence_char_counts", [])]
+        char_stream = _reconstruct_chars(char_classes, pos_deltas, sentence_counts)
+        roots = _split_roots(char_stream)
+
+        morph_codes = _flatten(payload.get("morph_codes", []))
+        words = [
+            apply_morph(root, morph_codes[idx] if idx < len(morph_codes) else 0)
+            for idx, root in enumerate(roots)
+        ]
+        return _join_words(words)
+
+    if isinstance(payload, dict) and "morphology" in payload:
+        words = [
+            apply_morph(entry["root"], entry["code"])
+            for entry in payload.get("morphology", [])
+        ]
+        return _join_words(words)
+
+    return ""
 
 
 def analyse(text: str, model: str | None = None) -> None:
