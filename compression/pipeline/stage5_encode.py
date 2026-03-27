@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import heapq
+import json
+import struct
+from collections import Counter
 from math import factorial, sqrt
 from typing import Dict, List, Tuple, TypedDict
 
@@ -139,26 +143,11 @@ def _expand_pos_tags_for_chars(roots: List[str], pos_tags: List[str]) -> List[st
 
 
 class PosEncoding(TypedDict):
-    pos_ids: List[int]
-    pos_deltas: List[int]
-    encoded_values: List[int]
-    used_delta: bool
-    mean_abs_delta: float
-    flat_mean_abs_delta: float
-    flat_cost: float
-    delta_cost: float
+    pos_huffman_bits: int
+    pos_huffman_bitstring: str
+    pos_huffman_codes: Dict[str, str]
+    tag_count: int
     vocab_size: int
-    delta_vocab_size: int
-
-
-class PosDeltaReport(TypedDict):
-    flat_mean: float
-    delta_mean: float
-    improvement_ratio: float
-    conclusion: str
-    flat_cost: float
-    delta_cost: float
-    used_delta: bool
 
 
 class StructuralEncoder:
@@ -171,73 +160,85 @@ class StructuralEncoder:
         """Convert a serialised tree shape string to its integer ID in the symbol alphabet."""
         return self.alphabet.get_id(tree_shape, add=True)
 
-    def _encoding_cost(self, values: List[int], vocab_size: int) -> float:
-        """Estimate bit cost of encoding a sequence of integer values."""
-        import math
+    def build_pos_frequency_table(self, sentences: List[List[str]]) -> Dict[str, int]:
+        """Build a frequency table mapping POS tag -> count."""
+        counts = Counter(tag for sentence in sentences for tag in sentence)
+        return dict(counts)
 
-        if not values or vocab_size <= 1:
-            return 0.0
-        bits_per_symbol = math.log2(vocab_size)
-        return len(values) * bits_per_symbol
+    def build_pos_huffman_codes(self, freq_table: Dict[str, int]) -> Dict[str, str]:
+        """Build Huffman codes for POS tags using heapq."""
+        if not freq_table:
+            return {}
 
-    def encode_pos_deltas(
-        self, positions: List[int], vocab_size: int
-    ) -> Tuple[List[int], bool, float, float, int]:
-        """Encode POS positions, choosing flat or delta whichever is cheaper."""
-        if not positions:
-            return [], False, 0.0, 0.0, max(vocab_size, 1)
+        heap: List[Tuple[int, int, object]] = []
+        order = 0
+        for tag, count in freq_table.items():
+            heapq.heappush(heap, (count, order, tag))
+            order += 1
 
-        flat_cost = self._encoding_cost(positions, vocab_size)
-        deltas = [positions[0]] + [
-            positions[i] - positions[i - 1] for i in range(1, len(positions))
-        ]
-        delta_vocab_size = max(2 * vocab_size - 1, 1)
-        delta_cost = self._encoding_cost(deltas, delta_vocab_size)
-        FLAG_COST = 1.0
+        if len(heap) == 1:
+            _, _, tag = heap[0]
+            return {str(tag): "0"}
 
-        if delta_cost + FLAG_COST < flat_cost:
-            return deltas, True, flat_cost, delta_cost + FLAG_COST, delta_vocab_size
-        return positions, False, flat_cost, delta_cost + FLAG_COST, delta_vocab_size
+        while len(heap) > 1:
+            freq1, _, node1 = heapq.heappop(heap)
+            freq2, _, node2 = heapq.heappop(heap)
+            merged = (node1, node2)
+            heapq.heappush(heap, (freq1 + freq2, order, merged))
+            order += 1
 
-    def encode_pos_sequence(self, pos_tags: List[str]) -> PosEncoding:
-        """Convert POS tag sequence to delta-encoded integer stream."""
-        pos_ids = [self.alphabet.get_id(tag, add=True) for tag in pos_tags]
-        vocab_size = max(len(set(pos_ids)), 1)
-        if not pos_ids:
+        _, _, root = heap[0]
+        codes: Dict[str, str] = {}
+
+        def assign(node, prefix: str) -> None:
+            if isinstance(node, str):
+                codes[node] = prefix or "0"
+                return
+            left, right = node
+            assign(left, prefix + "0")
+            assign(right, prefix + "1")
+
+        assign(root, "")
+        return codes
+
+    def encode_pos_sequence(
+        self, pos_tags: List[str], freq_table: Dict[str, int]
+    ) -> PosEncoding:
+        """Encode POS tag sequence with Huffman coding."""
+        codes = self.build_pos_huffman_codes(freq_table)
+        if not pos_tags or not codes:
             return {
-                "pos_ids": [],
-                "pos_deltas": [],
-                "encoded_values": [],
-                "used_delta": False,
-                "mean_abs_delta": 0.0,
-                "flat_mean_abs_delta": 0.0,
-                "flat_cost": 0.0,
-                "delta_cost": 0.0,
-                "vocab_size": vocab_size,
-                "delta_vocab_size": 0,
+                "pos_huffman_bits": 0,
+                "pos_huffman_bitstring": "",
+                "pos_huffman_codes": codes,
+                "tag_count": 0,
+                "vocab_size": len(codes),
             }
-        pos_deltas = [pos_ids[0]] + [b - a for a, b in zip(pos_ids, pos_ids[1:])]
-        mean_abs_delta = sum(abs(v) for v in pos_deltas[1:]) / max(
-            len(pos_deltas) - 1, 1
-        )
-        flat_mean_abs_delta = sum(abs(v) for v in pos_ids) / max(len(pos_ids), 1)
 
-        encoded_values, used_delta, flat_cost, delta_cost, delta_vocab_size = (
-            self.encode_pos_deltas(pos_ids, vocab_size)
-        )
-
+        bitstring = "".join(codes.get(tag, "") for tag in pos_tags)
         return {
-            "pos_ids": pos_ids,
-            "pos_deltas": pos_deltas,
-            "encoded_values": encoded_values,
-            "used_delta": used_delta,
-            "mean_abs_delta": float(mean_abs_delta),
-            "flat_mean_abs_delta": float(flat_mean_abs_delta),
-            "flat_cost": float(flat_cost),
-            "delta_cost": float(delta_cost),
-            "vocab_size": int(vocab_size),
-            "delta_vocab_size": int(delta_vocab_size),
+            "pos_huffman_bits": len(bitstring),
+            "pos_huffman_bitstring": bitstring,
+            "pos_huffman_codes": codes,
+            "tag_count": len(pos_tags),
+            "vocab_size": len(codes),
         }
+
+    def decode_pos_sequence(
+        self, bitstring: str, huffman_codes: Dict[str, str]
+    ) -> List[str]:
+        """Decode Huffman-encoded POS bitstring back to tag sequence."""
+        if not bitstring or not huffman_codes:
+            return []
+        code_to_tag = {code: tag for tag, code in huffman_codes.items()}
+        decoded: List[str] = []
+        buffer = ""
+        for bit in bitstring:
+            buffer += bit
+            if buffer in code_to_tag:
+                decoded.append(code_to_tag[buffer])
+                buffer = ""
+        return decoded
 
     def encode_sentence_meta(self, syntax_result: SyntaxResult) -> Dict[str, int]:
         """Encode sentence-level metadata as single symbol codes."""
@@ -253,20 +254,6 @@ class StructuralEncoder:
             "sentence_type_code": sentence_type_map.get(syntax_result.sentence_type, 0),
             "voice_code": voice_map.get(syntax_result.voice, 0),
         }
-
-    def decode_pos_sequence(
-        self, encoded_values: List[int], used_delta: bool
-    ) -> List[str]:
-        """Reconstruct POS tag strings from encoded values."""
-        if not encoded_values:
-            return []
-        if used_delta:
-            ids = [encoded_values[0]]
-            for delta in encoded_values[1:]:
-                ids.append(ids[-1] + delta)
-        else:
-            ids = list(encoded_values)
-        return [self.alphabet.get_symbol(pos_id) for pos_id in ids]
 
     def decode_sentence_meta(self, meta: Dict[str, int]) -> Dict[str, str]:
         """Reconstruct sentence_type and voice strings from codes."""
@@ -284,28 +271,26 @@ class StructuralEncoder:
             "voice": voice_reverse.get(meta.get("voice_code", 0), "ACTIVE"),
         }
 
-    def measure_pos_delta_improvement(self, pos_tags: List[str]) -> PosDeltaReport:
-        """Measure POS delta effectiveness and print a conclusion."""
-        encoded = self.encode_pos_sequence(pos_tags)
-        flat_mean = float(encoded["flat_mean_abs_delta"])
-        delta_mean = float(encoded["mean_abs_delta"])
-        flat_cost = float(encoded["flat_cost"])
-        delta_cost = float(encoded["delta_cost"])
-        improvement = (flat_cost / delta_cost) if delta_cost else 0.0
-        conclusion = "DELTA HELPS" if delta_cost < flat_cost else "DELTA DOES NOT HELP"
-        print(
-            f"POS delta test: flat={flat_cost:.4f} delta={delta_cost:.4f} "
-            f"ratio={improvement:.3f} -> {conclusion}"
-        )
-        return {
-            "flat_mean": flat_mean,
-            "delta_mean": delta_mean,
-            "improvement_ratio": improvement,
-            "conclusion": conclusion,
-            "flat_cost": flat_cost,
-            "delta_cost": delta_cost,
-            "used_delta": bool(encoded["used_delta"]),
-        }
+    def serialise_freq_table(self, freq_table: Dict[str, int]) -> bytes:
+        """Serialise frequency table to bytes for storage in archive header."""
+        return json.dumps(freq_table, separators=(",", ":")).encode("utf-8")
+
+    def deserialise_freq_table(self, data: bytes) -> Dict[str, int]:
+        """Deserialise frequency table from archive header bytes."""
+        return json.loads(data.decode("utf-8"))
+
+    def write_archive(self, freq_table: Dict[str, int], payload: bytes) -> bytes:
+        """Write a length-prefixed archive with freq table header."""
+        table_bytes = self.serialise_freq_table(freq_table)
+        header = struct.pack(">I", len(table_bytes))
+        return header + table_bytes + payload
+
+    def read_archive(self, data: bytes) -> Tuple[Dict[str, int], bytes]:
+        """Read a length-prefixed archive and return freq table + payload."""
+        table_len = struct.unpack(">I", data[:4])[0]
+        table_bytes = data[4 : 4 + table_len]
+        payload = data[4 + table_len :]
+        return self.deserialise_freq_table(table_bytes), payload
 
 
 class CharacterEncoder:
@@ -359,6 +344,7 @@ class CharacterEncoder:
         morphology_results: List[Tuple],
         syntax_result: SyntaxResult,
         structural_encoder: StructuralEncoder,
+        freq_table: Dict[str, int],
     ) -> Dict[str, object]:
         """Encode a full sentence combining character and structural streams."""
         roots: List[str] = []
@@ -376,12 +362,11 @@ class CharacterEncoder:
         char_classes = _char_classes_from_triples(triples)
         char_morph_codes = _expand_morph_codes_for_chars(roots, morph_codes)
         char_pos_tags = _expand_pos_tags_for_chars(roots, syntax_result.pos_tags)
-        pos_encoding = structural_encoder.encode_pos_sequence(syntax_result.pos_tags)
+        pos_encoding = structural_encoder.encode_pos_sequence(
+            syntax_result.pos_tags, freq_table
+        )
         tree_shape_id = structural_encoder.encode_tree_shape(syntax_result.tree_shape)
         sentence_meta = structural_encoder.encode_sentence_meta(syntax_result)
-        pos_delta_report = structural_encoder.measure_pos_delta_improvement(
-            syntax_result.pos_tags
-        )
 
         return {
             **char_encoding,
@@ -394,7 +379,9 @@ class CharacterEncoder:
             "pos_encoding": pos_encoding,
             "tree_shape_id": tree_shape_id,
             "sentence_meta": sentence_meta,
-            "pos_delta_report": pos_delta_report,
+            "pos_huffman_bits": pos_encoding["pos_huffman_bits"],
+            "pos_huffman_codes": pos_encoding["pos_huffman_codes"],
+            "pos_n_tags": pos_encoding["tag_count"],
         }
 
     def decode_word(self, encoded: Dict[str, List[int]]) -> str:

@@ -1,0 +1,41 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.0.2, pluggy-1.6.0 -- /mnt/gamedisk/Python_Projects/OpenAI_Parameter_Golf_Research_Challenge/.venv/bin/python3.11
+cachedir: .pytest_cache
+rootdir: /mnt/gamedisk/Python_Projects/OpenAI_Parameter_Golf_Research_Challenge
+plugins: anyio-4.13.0
+collecting ... collected 26 items
+
+compression/tests/test_stage6.py::test_probability_sums_to_one PASSED    [  3%]
+compression/tests/test_stage6.py::test_no_zero_probability PASSED        [  7%]
+compression/tests/test_stage6.py::test_bpb_below_naive PASSED            [ 11%]
+compression/tests/test_stage6.py::test_bpb_better_than_unigram PASSED    [ 15%]
+compression/tests/test_stage6.py::test_model_serialise_round_trip PASSED [ 19%]
+compression/tests/test_stage7.py::test_round_trip_short PASSED           [ 23%]
+compression/tests/test_stage7.py::test_round_trip_long PASSED            [ 26%]
+compression/tests/test_stage7.py::test_high_prob_symbol_cheaper PASSED   [ 30%]
+compression/tests/test_stage7.py::test_bpb_on_toy_corpus PASSED          [ 34%]
+compression/tests/test_stage7.py::test_state_serialisation PASSED        [ 38%]
+compression/tests/test_track_a.py::test_phonetic_map_complete PASSED     [ 42%]
+compression/tests/test_track_a.py::test_delta_range_improvement PASSED   [ 46%]
+compression/tests/test_track_a.py::test_improvement_ratio PASSED         [ 50%]
+compression/tests/test_track_a.py::test_morph_role_near_zero PASSED      [ 53%]
+compression/tests/test_track_a.py::test_round_trip_encode_decode PASSED  [ 57%]
+compression/tests/test_track_a.py::test_factoriadic_small_numbers PASSED [ 61%]
+compression/tests/test_track_a.py::test_special_symbols_handled PASSED   [ 65%]
+compression/tests/test_track_b.py::test_morph_common_inflections PASSED  [ 69%]
+compression/tests/test_track_b.py::test_morph_round_trip PASSED          [ 73%]
+compression/tests/test_track_b.py::test_morph_char_savings PASSED        [ 76%]
+compression/tests/test_track_b.py::test_pos_huffman_encoding PASSED      [ 80%]
+compression/tests/test_track_b.py::test_frequency_sorted_index_reduces_deltas PASSED [ 84%]
+compression/tests/test_track_b.py::test_tree_shape_consistent PASSED     [ 88%]
+compression/tests/test_track_b.py::test_structural_round_trip PASSED     [ 92%]
+compression/tests/test_track_b.py::test_sentence_meta_round_trip PASSED  [ 96%]
+compression/tests/test_track_b.py::test_syntax_sentence_type PASSED      [100%]
+
+=============================== warnings summary ===============================
+.venv/lib64/python3.11/site-packages/torch/jit/_script.py:1488
+  /mnt/gamedisk/Python_Projects/OpenAI_Parameter_Golf_Research_Challenge/.venv/lib64/python3.11/site-packages/torch/jit/_script.py:1488: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 26 passed, 1 warning in 7.77s =========================

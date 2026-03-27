@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+_PASSIVE_SUBJ_DEPS = frozenset({"nsubjpass", "nsubj:pass"})
+_PASSIVE_AUX_DEPS = frozenset({"auxpass", "aux:pass"})
+
 
 @dataclass
 class SyntaxResult:
@@ -32,7 +35,7 @@ def analyse_sentence(doc) -> SyntaxResult:
 
     sentence_text = sent.text.strip() if hasattr(sent, "text") else doc.text.strip()
     sentence_type = _detect_sentence_type(sent, sentence_text)
-    voice = "PASSIVE" if any(token.dep_ == "auxpass" for token in sent) else "ACTIVE"
+    voice = _detect_voice(sent)
     phrase_boundaries = _extract_phrase_boundaries(sent)
 
     return SyntaxResult(
@@ -113,6 +116,16 @@ def _detect_sentence_type(doc, sentence_text: str) -> str:
             return "IMPERATIVE"
 
     return "DECLARATIVE"
+
+
+def _detect_voice(doc) -> str:
+    """Detect active or passive voice from a spaCy doc or sentence span."""
+    for token in doc:
+        if token.dep_ in _PASSIVE_SUBJ_DEPS:
+            return "PASSIVE"
+        if token.dep_ in _PASSIVE_AUX_DEPS:
+            return "PASSIVE"
+    return "ACTIVE"
 
 
 def _extract_phrase_boundaries(doc) -> List[Tuple[int, int, str]]:

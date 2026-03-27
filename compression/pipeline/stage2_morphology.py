@@ -58,14 +58,15 @@ class MorphResult:
 class MorphologicalAnalyser:
     """Analyse words into (root, morph_code) pairs."""
 
-    def __init__(self, use_spacy: bool = True) -> None:
+    def __init__(self, use_spacy: bool = True, model_name: str | None = None) -> None:
         self.use_spacy = use_spacy
         self.nlp = None
+        model_to_load = model_name or SPACY_MODEL
         if use_spacy:
             try:
                 import spacy  # type: ignore
 
-                self.nlp = spacy.load(SPACY_MODEL)
+                self.nlp = spacy.load(model_to_load)
                 self.nlp.max_length = SPACY_MAX_LENGTH
             except Exception:
                 self.nlp = None

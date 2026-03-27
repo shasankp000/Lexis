@@ -20,7 +20,7 @@ def test_probability_sums_to_one():
     model = ContextMixingModel()
     model.train(_toy_encoded_sentences())
     context = {
-        "prev_char_class": 0,
+        "char_history": [0],
         "current_morph_code": 1,
         "current_pos_tag": "NOUN",
     }
@@ -32,7 +32,7 @@ def test_no_zero_probability():
     model = ContextMixingModel()
     model.train(_toy_encoded_sentences())
     context = {
-        "prev_char_class": 1,
+        "char_history": [1],
         "current_morph_code": 1,
         "current_pos_tag": "VERB",
     }
@@ -66,7 +66,7 @@ def test_bpb_better_than_unigram():
     prev = sequence[0]
     for idx, symbol in enumerate(sequence):
         context = {
-            "prev_char_class": prev,
+            "char_history": [prev],
             "current_morph_code": char_morph_codes[idx],
             "current_pos_tag": char_pos_tags[idx],
         }
@@ -92,7 +92,7 @@ def test_model_serialise_round_trip(tmp_path):
     reloaded.load(str(path))
 
     context = {
-        "prev_char_class": 0,
+        "char_history": [0],
         "current_morph_code": 1,
         "current_pos_tag": "NOUN",
     }

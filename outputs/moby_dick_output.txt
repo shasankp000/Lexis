@@ -1,4 +1,6 @@
-·• python main.py analyse moby_dick.txt
+# Model used: en_core_web_sm
+# Outdated architecture, bpb score not valid.
+
 POS delta test: flat=3.4524 delta=2.9268 ratio=1.180 -> DELTA HELPS
 POS delta test: flat=5.5000 delta=3.9655 ratio=1.387 -> DELTA HELPS
 POS delta test: flat=6.5172 delta=4.5714 ratio=1.426 -> DELTA HELPS

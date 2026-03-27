@@ -1,0 +1,29 @@
+Context-mixing bpb: 3.5110
+Stage 2 — Morphology
+  original_chars: 1018112.0
+  root_chars: 969560.0
+  chars_saved: 48552.0
+  pct_saved: 4.768827005280362
+Stage 5 — Character Encoding
+  mean_class_delta: 2.1665877182713005
+  mean_pos_delta: 1.615155090070213
+  mean_role_delta: 0.7542663652819178
+  mean_flat_delta: 14.707124867543804
+  mean_decomp_magnitude: 3.1586243121825133
+  improvement_ratio: 4.6561804804768405
+Stage 5 — POS Huffman Summary
+  total_sentences: 9502
+  total_huffman_bits: 937890.0
+  avg_bits_per_sentence: 98.7044832666807
+  avg_bits_per_tag: 3.5526136363636365
+  huffman_codes: {'AUX': '0000', 'SCONJ': '00010', 'SYM': '000110000', 'X': '000110001', 'INTJ': '00011001', 'NUM': '0001101', 'PART': '000111', 'DET': '001', 'VERB': '010', 'ADP': '011', 'ADV': '1000', 'ADJ': '1001', 'CCONJ': '10100', 'PROPN': '10101', 'PRON': '1011', 'PUNCT': '110', 'NOUN': '111'}
+  flat_bits_baseline: 1320000.0
+  bits_saved_vs_flat: 382110.0
+Stage 6 — Probability Model (Context Mixing)
+  bpb: 3.5110242660639273
+  char_vocab_size: 7
+  morph_vocab_size: 9
+  pos_vocab_size: 17
+  char_context_size: 7
+  morph_context_size: 9
+  struct_context_size: 17
