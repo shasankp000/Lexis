@@ -15,18 +15,18 @@ except ImportError:
 
 MORPH_CODES: Dict[str, int] = {
     "BASE": 0,  # no transformation
-    "PLURAL": 1,  # dogs → dog
-    "PAST_TENSE": 2,  # walked → walk
-    "PRESENT_PART": 3,  # running → run
-    "PAST_PART": 4,  # broken → break (irregular past participle)
-    "THIRD_SING": 5,  # runs → run
-    "COMPARATIVE": 6,  # faster → fast
-    "SUPERLATIVE": 7,  # fastest → fast
-    "ADVERBIAL": 8,  # quickly → quick
-    "NEGATION": 9,  # unhappy → happy
-    "AGENT": 10,  # runner → run
-    "NOMINALIZE": 11,  # darkness → dark
-    "IRREGULAR": 12,  # went → go (stored with separate irregular lookup)
+    "PLURAL": 1,  # dogs -> dog
+    "PAST_TENSE": 2,  # walked -> walk
+    "PRESENT_PART": 3,  # running -> run
+    "PAST_PART": 4,  # broken -> break (irregular past participle)
+    "THIRD_SING": 5,  # runs -> run
+    "COMPARATIVE": 6,  # faster -> fast
+    "SUPERLATIVE": 7,  # fastest -> fast
+    "ADVERBIAL": 8,  # quickly -> quick
+    "NEGATION": 9,  # unhappy -> happy
+    "AGENT": 10,  # runner -> run
+    "NOMINALIZE": 11,  # darkness -> dark
+    "IRREGULAR": 12,  # went -> go (stored with separate irregular lookup)
 }
 
 MORPH_CODE_NAMES: Dict[int, str] = {v: k for k, v in MORPH_CODES.items()}
@@ -60,6 +60,11 @@ _CODE_TO_PTB: Dict[int, str | None] = {
     NOMINALIZE: None,
 }
 
+# Safety-net overrides for the IRREGULAR decode path.
+# Any word in this table is returned verbatim, bypassing lemminflect.
+# This covers identity-mapped words (surface == root) that must never
+# be passed to lemminflect(VBD), and irregular comparatives/superlatives
+# that are encoded directly under the IRREGULAR code.
 _DECODE_OVERRIDES: Dict[str, str] = {
     # be-verb ambiguities (lemminflect returns "was" for all be/VBD)
     "are": "are",
@@ -87,6 +92,21 @@ _DECODE_OVERRIDES: Dict[str, str] = {
     "themselves": "themselves",
     "yourself": "yourself",
     "yourselves": "yourselves",
+    # Irregular comparatives / superlatives and other identity-mapped words.
+    # The encoder now emits BASE for these, but these overrides act as a
+    # decoder-side safety net in case any old payload encodes them as IRREGULAR.
+    "most": "most",
+    "best": "best",
+    "worst": "worst",
+    "least": "least",
+    "more": "more",
+    "better": "better",
+    "worse": "worse",
+    "less": "less",
+    "further": "further",
+    "furthest": "furthest",
+    "many": "many",
+    "much": "much",
 }
 
 

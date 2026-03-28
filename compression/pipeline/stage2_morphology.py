@@ -83,6 +83,12 @@ _IRREGULAR_SURFACE_TO_ROOT: Dict[str, str] = {
     "much": "much",
 }
 
+# Words whose surface == root: must always encode as BASE, never IRREGULAR,
+# because the IRREGULAR decode path calls lemminflect(VBD) and would corrupt them.
+_IDENTITY_WORDS: frozenset = frozenset(
+    word for word, root in _IRREGULAR_SURFACE_TO_ROOT.items() if word == root
+)
+
 
 @dataclass(frozen=True)
 class MorphResult:
@@ -179,6 +185,12 @@ class MorphologicalAnalyser:
         lemma = token.lemma_.lower() if token.lemma_ else lower_text
         morph = token.morph
 
+        # Identity-mapped words (surface == root) must stay BASE.
+        # Returning IRREGULAR for them causes the decoder to call
+        # lemminflect(VBD) and corrupt the word (e.g. "most" -> "mosted").
+        if lower_text in _IDENTITY_WORDS:
+            return (lower_text, BASE)
+
         if lower_text in _IRREGULAR_SURFACE_TO_ROOT:
             return (_IRREGULAR_SURFACE_TO_ROOT[lower_text], IRREGULAR)
 
@@ -238,6 +250,10 @@ class MorphologicalAnalyser:
 
     def _analyse_rule_based(self, word: str) -> Tuple[str, int]:
         lower = word.lower()
+
+        # Identity-mapped words must stay BASE in rule-based path too.
+        if lower in _IDENTITY_WORDS:
+            return (lower, BASE)
 
         if lower in _IRREGULAR_SURFACE_TO_ROOT:
             return (_IRREGULAR_SURFACE_TO_ROOT[lower], IRREGULAR)
