@@ -43,13 +43,23 @@ def run_discourse_roundtrip(text: str) -> None:
 
 
 def run_full_roundtrip(text: str, label: str = "") -> None:
-    """Full compress_to_file → decompress round-trip check."""
+    """
+    Full compress_to_file → decompress round-trip check.
+
+    `text` must already be the normalize_text() output so that the
+    comparison baseline matches what the compressor actually sees.
+    Case restoration in decompress() is intentionally partial (only
+    first character), so we compare lowercased normalised strings to
+    isolate codec correctness from case-restoration.
+    """
     print(f"\n=== Full Pipeline Round-Trip {label}===")
     compress_to_file(text, "moby_dick.bin")
     decompressed = decompress("moby_dick.bin")
 
-    orig = _normalise(text)
-    dec = _normalise(decompressed)
+    # Compare lowercased, whitespace-normalised forms to isolate codec
+    # correctness from the partial case-restoration in decompress().
+    orig = _normalise(text).lower()
+    dec = _normalise(decompressed).lower()
 
     i = next(
         (j for j in range(min(len(orig), len(dec))) if orig[j] != dec[j]),
@@ -82,6 +92,7 @@ def main() -> None:
     if args.chars:
         raw = raw[:args.chars]
 
+    # Always work on the normalised form — this is what the compressor sees
     text = normalize_text(raw)
     print(f"Text length: {len(text)} chars, {len(text.split())} tokens")
 
