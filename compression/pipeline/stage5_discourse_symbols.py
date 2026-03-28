@@ -6,6 +6,11 @@ Takes Stage 4 output (coreference_chains + discourse_relations) and produces:
   - Discourse connectives aligned to detected relations are replaced with §R{n} symbols
 
 Round-trip guarantee: decode_symbols(encode_symbols(text, stage4)[0], stage4) == text
+
+NOTE: Pronoun substitution (He/Him/She/They etc.) is intentionally disabled until
+Stage 4 is updated to emit absolute character offsets. Pronouns are too ambiguous to
+resolve safely from (sent_idx, token_idx) tuples when text is chunked. Only exact
+named-entity / noun-phrase repeats are substituted, which is still valid compression.
 """
 
 from __future__ import annotations
@@ -36,8 +41,7 @@ _WORD_CHAR = re.compile(r"\w")
 def _find_all_occurrences(text: str, surface: str) -> List[Tuple[int, int]]:
     """
     Find every occurrence of `surface` in `text` that is NOT a strict prefix
-    of a longer token (word char immediately after) or a possessive stem
-    (apostrophe + word char immediately after).
+    of a longer token or a possessive stem.
     """
     results = []
     for m in re.finditer(re.escape(surface), text):
@@ -51,87 +55,49 @@ def _find_all_occurrences(text: str, surface: str) -> List[Tuple[int, int]]:
     return results
 
 
-def _sentence_char_boundaries(text: str) -> List[Tuple[int, int]]:
-    """
-    Split text into sentences (same regex as Stage 4's _chunk_at_sentences)
-    and return (char_start, char_end) for each sentence.
-    """
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    boundaries: List[Tuple[int, int]] = []
-    cursor = 0
-    for sent in sentences:
-        start = text.index(sent, cursor)
-        end = start + len(sent)
-        boundaries.append((start, end))
-        cursor = end
-    return boundaries
-
-
 def _get_char_offsets(
     text: str,
     mentions: List[MentionTuple],
+    named_only: bool = False,
 ) -> List[Tuple[int, int, str]]:
     """
     Resolve mention tuples to (char_start, char_end, surface), sorted by char_start.
 
-    If Stage 4 provides 5-tuples with char spans, use them directly.
+    If Stage 4 provides 5-tuples with absolute char spans, use them directly —
+    this is the safe path and enables pronoun substitution.
 
-    Otherwise: for each mention (sent_idx, token_idx, surface), find the occurrence
-    of `surface` that falls within the sentence indicated by sent_idx. This prevents
-    grabbing the wrong occurrence of a common pronoun (e.g. "Him") that appears in
-    multiple sentences.
+    Otherwise (3-tuple fallback): build an occurrence pool per surface and consume
+    left-to-right. When named_only=True, pronoun surfaces are skipped entirely
+    to avoid cross-chunk sentence-index mismatches.
     """
     has_offsets = mentions and len(mentions[0]) >= 5
+
     if has_offsets:
         resolved = [(m[3], m[4], m[2]) for m in mentions]
         return sorted(resolved, key=lambda x: x[0])
 
-    # Build sentence boundaries once
-    sent_bounds = _sentence_char_boundaries(text)
-
-    # Pre-build occurrence list per surface
+    # Build pool per surface
     surface_pool: Dict[str, List[Tuple[int, int]]] = {}
     for m in mentions:
         surface = m[2]
+        if named_only and surface.strip() in PRONOUNS:
+            continue
         if surface not in surface_pool:
             surface_pool[surface] = _find_all_occurrences(text, surface)
 
+    surface_cursors: Dict[str, int] = {s: 0 for s in surface_pool}
     resolved: List[Tuple[int, int, str]] = []
-    used_spans: set = set()
 
     for m in mentions:
-        sent_idx, token_idx, surface = m[0], m[1], m[2]
-        occurrences = surface_pool[surface]
-
-        # Determine the char range for this sentence
-        if sent_idx < len(sent_bounds):
-            sent_start, sent_end = sent_bounds[sent_idx]
-        else:
-            sent_start, sent_end = 0, len(text)
-
-        # Find the first unused occurrence that falls within the sentence window.
-        # If none found in the sentence, fall back to the nearest unused occurrence
-        # after sent_start (handles slight sentence-split mismatches).
-        best: Optional[Tuple[int, int]] = None
-        for occ_start, occ_end in occurrences:
-            if (occ_start, occ_end) in used_spans:
-                continue
-            if sent_start <= occ_start < sent_end:
-                best = (occ_start, occ_end)
-                break
-
-        if best is None:
-            # Fallback: nearest unused occurrence at or after sent_start
-            for occ_start, occ_end in occurrences:
-                if (occ_start, occ_end) in used_spans and occ_start >= sent_start:
-                    continue
-                if occ_start >= sent_start:
-                    best = (occ_start, occ_end)
-                    break
-
-        if best is not None:
-            used_spans.add(best)
-            resolved.append((best[0], best[1], surface))
+        surface = m[2]
+        if surface not in surface_pool:
+            continue  # skipped (pronoun in named_only mode)
+        pool = surface_pool[surface]
+        idx = surface_cursors[surface]
+        if idx < len(pool):
+            char_start, char_end = pool[idx]
+            resolved.append((char_start, char_end, surface))
+            surface_cursors[surface] = idx + 1
 
     return sorted(resolved, key=lambda x: x[0])
 
@@ -156,34 +122,23 @@ def _resolve_relation_offsets(
             key=lambda x: x[0],
         )
 
-    sent_bounds = _sentence_char_boundaries(text)
     connective_pool: Dict[str, List[Tuple[int, int]]] = {}
     for r in relations:
         c = r[2]
         if c not in connective_pool:
             connective_pool[c] = _find_all_occurrences(text, c)
 
-    used_spans: set = set()
+    connective_cursors: Dict[str, int] = {c: 0 for c in connective_pool}
     resolved: List[Tuple[int, int, str, str]] = []
+
     for r in relations:
-        sent_idx, connective, rel_type = r[0], r[2], r[3]
+        connective, rel_type = r[2], r[3]
         pool = connective_pool[connective]
-        sent_start, sent_end = (
-            sent_bounds[sent_idx] if sent_idx < len(sent_bounds) else (0, len(text))
-        )
-        best: Optional[Tuple[int, int]] = None
-        for occ_start, occ_end in pool:
-            if (occ_start, occ_end) not in used_spans and sent_start <= occ_start < sent_end:
-                best = (occ_start, occ_end)
-                break
-        if best is None:
-            for occ_start, occ_end in pool:
-                if (occ_start, occ_end) not in used_spans and occ_start >= sent_start:
-                    best = (occ_start, occ_end)
-                    break
-        if best is not None:
-            used_spans.add(best)
-            resolved.append((best[0], best[1], connective, rel_type))
+        idx = connective_cursors[connective]
+        if idx < len(pool):
+            char_start, char_end = pool[idx]
+            resolved.append((char_start, char_end, connective, rel_type))
+            connective_cursors[connective] = idx + 1
 
     return sorted(resolved, key=lambda x: x[0])
 
@@ -209,17 +164,34 @@ def encode_symbols(
     encode_relations: bool = False,
 ) -> Tuple[str, SymbolTable]:
     """
-    Replace repeated entity mentions (and optionally discourse connectives)
+    Replace repeated named-entity mentions (and optionally discourse connectives)
     with compact symbols. Lossless: decode_symbols(result, table) == text.
+
+    Pronoun mentions (He/Him/She/They etc.) are skipped when Stage 4 does not
+    provide absolute char offsets, because (sent_idx, token_idx) tuples are
+    chunk-relative and cannot be safely resolved to global positions.
+
+    Once Stage 4 is updated to emit 5-tuples with absolute char spans, pronoun
+    substitution will be enabled automatically via the has_offsets path.
     """
     symbol_table: SymbolTable = {}
     ops: List[Tuple[int, int, str]] = []
 
-    for eid, mentions in stage4_result.get("coreference_chains", {}).items():
+    # Detect whether Stage 4 provides absolute offsets
+    chains = stage4_result.get("coreference_chains", {})
+    has_absolute_offsets = any(
+        mentions and len(mentions[0]) >= 5
+        for mentions in chains.values()
+    )
+    # Use named_only mode when we only have relative 3-tuples
+    named_only = not has_absolute_offsets
+
+    for eid, mentions in chains.items():
         if not mentions:
             continue
-        resolved = _get_char_offsets(text, mentions)
-        if not resolved:
+        resolved = _get_char_offsets(text, mentions, named_only=named_only)
+        if len(resolved) < 2:
+            # Need at least anchor + 1 substitution to be worth encoding
             continue
 
         symbol = f"§E{eid}"
