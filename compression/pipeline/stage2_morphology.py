@@ -185,6 +185,15 @@ class MorphologicalAnalyser:
         lemma = token.lemma_.lower() if token.lemma_ else lower_text
         morph = token.morph
 
+        # Non-alpha tokens (digits, URLs, punctuation, mixed symbols) can never
+        # be inflected meaningfully. Return them verbatim as BASE so that
+        # apply_morph is a no-op and round-trip is guaranteed.
+        # Example: spaCy assigns Number=Plur to bare cardinals like '2701',
+        # which would otherwise fall through to the PLURAL branch and produce
+        # '2701s' via lemminflect.
+        if not any(ch.isalpha() for ch in lower_text):
+            return (lower_text, BASE)
+
         # Identity-mapped words (surface == root) must stay BASE.
         # Returning IRREGULAR for them causes the decoder to call
         # lemminflect(VBD) and corrupt the word (e.g. "most" -> "mosted").
@@ -227,8 +236,10 @@ class MorphologicalAnalyser:
         if token.pos_ == "PRON":
             return (lower_text, BASE)
 
+        # NUM must be checked before Number=Plur / Degree / Person=3 because
+        # spaCy occasionally assigns Number=Plur morphology to cardinal numbers.
         if token.pos_ == "NUM":
-            return (lemma, BASE)
+            return (lower_text, BASE)
 
         if "Number=Plur" in morph:
             return (lemma, PLURAL)
@@ -250,6 +261,10 @@ class MorphologicalAnalyser:
 
     def _analyse_rule_based(self, word: str) -> Tuple[str, int]:
         lower = word.lower()
+
+        # Non-alpha tokens bypass all inflection logic.
+        if not any(ch.isalpha() for ch in lower):
+            return (lower, BASE)
 
         # Identity-mapped words must stay BASE in rule-based path too.
         if lower in _IDENTITY_WORDS:
