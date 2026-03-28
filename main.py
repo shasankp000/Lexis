@@ -342,20 +342,20 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
     discourse_compressed, symbol_table = _run_discourse(normalized)
     print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
 
-    # Remaining stages operate on the discourse-compressed text
+    # Character / morphology layers must operate on clean text only.
+    # §E{n} symbols are not in the phonetic alphabet and would corrupt the
+    # character stream if fed to _encode_for_model.
     analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
-    morphology = analyser.analyse_sentence(discourse_compressed)
+    morphology = analyser.analyse_sentence(normalized)
 
     encoder = CharacterEncoder()
-    stats = encoder.stats(discourse_compressed)
+    stats = encoder.stats(normalized)
 
-    encoded_sentences, pos_freq_table = _encode_for_model(
-        discourse_compressed, model=model
-    )
+    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
     bpb_value = context_model.bpb(
-        discourse_compressed, _EncodedPipeline(encoded_sentences)
+        normalized, _EncodedPipeline(encoded_sentences)
     )
 
     payload = {
@@ -387,13 +387,17 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
 def compress_to_file(text: str, output_path: str, model: str | None = None) -> Dict:
     """
     Full compression pipeline with arithmetic coding.
-    Stage 4+5 (discourse symbol encoding) runs first, then all subsequent
-    stages operate on the symbol-compressed text. The symbol table is stored
-    in the msgpack payload for lossless reconstruction at decompress time.
+
+    Stage 4+5 (discourse symbol encoding) runs on the normalised text to
+    produce a symbol_table. The character/morphology pipeline then encodes
+    the *original normalised text* (not the §-symbol version), because §E{n}
+    tokens are outside the phonetic alphabet and would corrupt the character
+    stream. The symbol_table is stored in the msgpack payload and is applied
+    as the very last step in decompress() after join/case-restore.
     """
     normalized = normalize_text(text)
 
-    # Stage 4+5: discourse symbol encoding
+    # Stage 4+5: discourse symbol encoding (for token-count stats + symbol table)
     print("[Stage 4+5] Running discourse analysis and symbol encoding...")
     discourse_compressed, symbol_table = _run_discourse(normalized)
     print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
@@ -404,9 +408,10 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    encoded_sentences, pos_freq_table = _encode_for_model(
-        discourse_compressed, model=model
-    )
+    # Character / morphology / probability layers operate on clean English only.
+    # Feeding discourse_compressed here would pass §-symbols into spaCy and the
+    # phonetic encoder, producing garbage roots (§ has no phonetic class entry).
+    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
 
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
@@ -536,7 +541,9 @@ def decompress(input_path: str) -> str:
         result = _join_words(words)
         result = result[0].upper() + result[1:] if result else result
 
-        # Stage 4+5 decode: restore symbols back to original surfaces
+        # Stage 4+5 decode: restore §E{n} symbols back to original surfaces.
+        # This is a no-op when the character pipeline encoded clean text
+        # (the symbol tokens never entered the char stream).
         if symbol_table:
             result = decode_symbols(result, symbol_table)
 
@@ -572,18 +579,16 @@ def analyse(text: str, model: str | None = None) -> None:
     )
 
     analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
-    morph_stats = analyser.char_savings(discourse_compressed)
+    morph_stats = analyser.char_savings(normalized)
 
     encoder = CharacterEncoder()
-    encode_stats = encoder.stats(discourse_compressed)
+    encode_stats = encoder.stats(normalized)
 
-    encoded_sentences, pos_freq_table = _encode_for_model(
-        discourse_compressed, model=model
-    )
+    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
     bpb_value = context_model.bpb(
-        discourse_compressed, _EncodedPipeline(encoded_sentences)
+        normalized, _EncodedPipeline(encoded_sentences)
     )
 
     print(f"Model: {model or SPACY_MODEL}")
