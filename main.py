@@ -222,7 +222,12 @@ def _flatten(nested: List[List[Any]]) -> List[Any]:
 
 
 _ATTACH_LEFT = set(".,;:!?)'\"-—%-/")
-_ATTACH_RIGHT = set("(\"'$#/")
+# Only '(' stays in _ATTACH_RIGHT. '"' and "'" were removed: in a flat decoded
+# token stream we cannot distinguish opening from closing quotes, so having
+# them here caused every word after a closing quote to be joined without a
+# space (e.g. '."while' instead of '. "while'). The '(' case is reinforced
+# by the result.replace('( ', '(') post-pass below.
+_ATTACH_RIGHT = set("($#/")
 
 
 def _join_words(words: list[str]) -> str:
