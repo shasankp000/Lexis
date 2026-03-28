@@ -40,6 +40,7 @@ from compression.pipeline.stage5_discourse_symbols import (
 from compression.pipeline.stage5_encode import CharacterEncoder, StructuralEncoder
 from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.stage7_arithmetic import ArithmeticDecoder, ArithmeticEncoder
+from compression.pipeline.stage9_autocorrect import autocorrect
 from compression.pipeline.utils import chunk_text
 
 
@@ -560,12 +561,11 @@ def decompress(input_path: str) -> str:
         result = result[0].upper() + result[1:] if result else result
 
         # Stage 4+5 decode: restore §E{n} symbols back to original surfaces.
-        # This is a no-op when the character pipeline encoded clean text
-        # (the symbol tokens never entered the char stream).
         if symbol_table:
             result = decode_symbols(result, symbol_table)
 
-        return result
+        # Stage 9: rule-based autocorrect — fixes spacing/punctuation artifacts.
+        return autocorrect(result)
 
     if isinstance(payload, dict) and "morphology" in payload:
         words = [
@@ -576,7 +576,7 @@ def decompress(input_path: str) -> str:
         result = result[0].upper() + result[1:] if result else result
         if symbol_table:
             result = decode_symbols(result, symbol_table)
-        return result
+        return autocorrect(result)
 
     return ""
 
