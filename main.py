@@ -480,16 +480,19 @@ def decompress(input_path: str) -> str:
             apply_morph(root, morph_codes[idx] if idx < len(morph_codes) else 0)
             for idx, root in enumerate(roots)
         ]
-        return _join_words(words)
+        result = _join_words(words)
+        return result[0].upper() + result[1:] if result else result
 
     if isinstance(payload, dict) and "morphology" in payload:
         words = [
             apply_morph(entry["root"], entry["code"])
             for entry in payload.get("morphology", [])
         ]
-        return _join_words(words)
+        result = _join_words(words)
+        return result[0].upper() + result[1:] if result else result
 
-    return ""
+    result = ""
+    return result[0].upper() + result[1:] if result else result
 
 
 def analyse(text: str, model: str | None = None) -> None:

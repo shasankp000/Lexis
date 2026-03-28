@@ -52,9 +52,9 @@ _CODE_TO_PTB: Dict[int, str | None] = {
     PRESENT_PART: "VBG",
     PAST_PART: "VBN",
     THIRD_SING: "VBZ",
-    COMPARATIVE: "JJR",
-    SUPERLATIVE: "JJS",
-    ADVERBIAL: "RB",
+    COMPARATIVE: None,  # lemminflect JJR is broken for irregulars
+    SUPERLATIVE: None,  # lemminflect JJS is broken for irregulars
+    ADVERBIAL: None,  # handled manually below, lemminflect doesn't do derivation
     NEGATION: None,
     AGENT: None,
     NOMINALIZE: None,
@@ -135,6 +135,51 @@ def apply_morph(root: str, code: int) -> str:
         if root.endswith("e"):
             return root[:-1] + "eness"
         return root + "ness"
+
+    if code == ADVERBIAL:
+        if root.endswith("ly"):
+            return root
+        if root.endswith("y") and len(root) > 1:
+            return root[:-1] + "ily"
+        if root.endswith("le") and len(root) > 2:
+            return root[:-2] + "ly"
+        return root + "ly"
+
+    if code == COMPARATIVE:
+        _irreg_cmp = {
+            "good": "better",
+            "bad": "worse",
+            "far": "further",
+            "little": "less",
+            "many": "more",
+            "much": "more",
+            "well": "better",
+        }
+        if root in _irreg_cmp:
+            return _irreg_cmp[root]
+        if root.endswith("y") and len(root) > 1:
+            return root[:-1] + "ier"
+        if root.endswith("e"):
+            return root + "r"
+        return root + "er"
+
+    if code == SUPERLATIVE:
+        _irreg_sup = {
+            "good": "best",
+            "bad": "worst",
+            "far": "furthest",
+            "little": "least",
+            "many": "most",
+            "much": "most",
+            "well": "best",
+        }
+        if root in _irreg_sup:
+            return _irreg_sup[root]
+        if root.endswith("y") and len(root) > 1:
+            return root[:-1] + "iest"
+        if root.endswith("e"):
+            return root + "st"
+        return root + "est"
 
     ptb_tag = _CODE_TO_PTB.get(code)
     if ptb_tag:

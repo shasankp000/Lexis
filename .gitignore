@@ -5,5 +5,5 @@ compression/pipeline/__pycache__/
 compression/tests/__pycache__/
 compression/alphabet/__pycache__/
 .pytest_cache
-.venv/
+.venv*/
 test*.bin

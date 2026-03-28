@@ -69,6 +69,18 @@ _IRREGULAR_SURFACE_TO_ROOT: Dict[str, str] = {
     "themselves": "themselves",
     "yourself": "yourself",
     "yourselves": "yourselves",
+    "most": "most",
+    "best": "best",
+    "worst": "worst",
+    "least": "least",
+    "more": "more",
+    "better": "better",
+    "worse": "worse",
+    "less": "less",
+    "further": "further",
+    "furthest": "furthest",
+    "many": "many",
+    "much": "much",
 }
 
 
