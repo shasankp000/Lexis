@@ -1,6 +1,6 @@
 # About
 
-A GPU-accelerated linguistic text compressor using hierarchical NLP and symbolic encoding made using python.
+A GPU-accelerated linguistic text compressor (currently for the English Language only, will expand to other languages later) using hierarchical NLP and symbolic encoding made using python.
 
 Primarily created as a research interest for https://github.com/openai/parameter-golf.
 
