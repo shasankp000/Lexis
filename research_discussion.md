@@ -2,7 +2,7 @@
 ## Research Discussion Document
 **Status:** Work in Progress  
 **Started:** March 2026  
-**Last Updated:** March 26, 2026
+**Last Updated:** March 28, 2026
 
 ---
 
@@ -72,7 +72,7 @@ Raw Text
 - Whitespace and encoding normalization
 - Basic tokenization
 
-### Stage 2 — Morphological Analysis ✅ Prototyped
+### Stage 2 — Morphological Analysis ✅ Implemented
 - Lemmatization — reduce words to root forms ("running" → "run")
 - Morpheme decomposition — split into root + affixes
 - Inflection tagging — record tense, number, degree separately from root
@@ -87,13 +87,14 @@ Raw Text
 - Identify sentence type (declarative, interrogative, imperative, exclamatory)
 - Tag voice (active/passive) and tense/aspect
 
-### Stage 4 — Discourse & Coreference Analysis
+### Stage 4 — Discourse & Coreference Analysis ✅ Implemented
 - Coreference resolution — link pronouns and definite references back to antecedents
 - Discourse connective tagging — cause/effect, contrast, sequence, elaboration
 - Symbolic link building — every reference to something earlier becomes a pointer
 - Literary device detection — parallelism, anaphora, antithesis, simile patterns
+- Uses `longformer-large-4096` fine-tuned on OntoNotes for coreference
 
-### Stage 5 — Symbolic Encoding
+### Stage 5 — Symbolic Encoding ✅ Implemented
 - Tree shapes encoded as structure symbols
 - POS sequences encoded relative to tree position
 - Words encoded as root + morphological transformation code
@@ -399,14 +400,48 @@ Using the example sentence **"the old man"**:
 
 ---
 
+### Test Suite 4 — Session 3: Full Pipeline Round-Trip (Moby Dick, 10,000 chars)
+
+#### Stage 4+5 Discourse Round-Trip ✅
+- Model: `longformer-large-4096` fine-tuned on OntoNotes (90.5M params)
+- Input: 9,742 chars / 1,526 tokens from Moby Dick
+- **Round-trip OK: True**
+- Original tokens: 1,526 → Compressed tokens: 1,515
+- Token reduction: **0.72%**
+- Symbols used: 15–16 (entity symbols like `§E1`=`the United States`, `§E2`=`Moby Dick` etc.)
+- Coreference + entity replacement working end-to-end
+
+#### Full Pipeline Round-Trip — bugs found and fixed
+
+**Bug 1: UTF-8 BOM corruption (fixed)**
+- `moby_dick.txt` has a UTF-8 BOM (`\ufeff`) as first character
+- Test script was reading with `encoding="utf-8"` which left the BOM in the string
+- Encoder and decoder both saw different starting points → `Match: False` at position 0
+- Fix: open with `encoding="utf-8-sig"` which auto-strips BOM
+- File patched: `test_round_trip_pipeline.py`
+
+**Bug 2: `most → mosted` morphology corruption (fixed)**
+- Root cause: `most`, `best`, `least`, `more`, `better` etc. were in `_IRREGULAR_SURFACE_TO_ROOT` with identity mappings (`"most": "most"`)
+- `_analyse_token_spacy` was returning `("most", IRREGULAR)` for these
+- `apply_morph("most", IRREGULAR)` calls `lemminflect(root, "VBD")` → produced `"mosted"` (past tense of a fake verb)
+- Fix in `stage2_morphology.py`: added `_IDENTITY_WORDS` frozenset (all entries where surface == root) and return `(word, BASE)` for them before the IRREGULAR branch
+- Fix in `morph_codes.py`: added the same words to `_DECODE_OVERRIDES` as decoder-side safety net for any old payloads
+- Files patched: `compression/pipeline/stage2_morphology.py`, `compression/alphabet/morph_codes.py`
+
+---
+
 ## 9. Open Research Questions
 
 ### Resolved since last session
-- ✅ Complex numbers vs mixed-radix: confirmed they are the same idea from two directions. Complex plane = geometric intuition. Mixed-radix = encoding mechanism. Unified: embed as (class + i·position), encode as separate components.
-- ✅ Delta encoding placement: confirmed beneficial at character level only with phonetic decomposition, not flat alphabet
+- ✅ Complex numbers vs mixed-radix: confirmed they are the same idea from two directions
+- ✅ Delta encoding placement: beneficial at character level only with phonetic decomposition
 - ✅ POS delta encoding tested in Track B with structural encoder metrics
+- ✅ Stage 4+5 discourse round-trip: confirmed working end-to-end
+- ✅ UTF-8 BOM corruption: fixed in test script
+- ✅ `most → mosted` morphology bug: fixed via `_IDENTITY_WORDS` guard and `_DECODE_OVERRIDES`
 
 ### Still open
+- Full pipeline round-trip `Match: True` still pending — needs verification after morphology fix
 - How to order structural symbol IDs so common sequential patterns produce small deltas
 - Full formal design of the complete symbol alphabet across all layers
 - Whether the 2.42× character-level improvement survives when combined with the full pipeline
@@ -423,11 +458,11 @@ Using the example sentence **"the old man"**:
 
 | Stage | Status | Notes |
 |---|---|---|
-| Stage 1 — Normalization | ✅ Implemented | `normalize_text` handles whitespace and line endings |
-| Stage 2 — Morphology | ✅ Implemented | spaCy-backed lemmatization + rule-based fallback + savings stats |
+| Stage 1 — Normalization | ✅ Implemented | `normalize_text` handles whitespace, line endings, UTF-8 BOM |
+| Stage 2 — Morphology | ✅ Implemented + Patched | spaCy-backed lemmatization + rule-based fallback; `_IDENTITY_WORDS` lossless fix applied |
 | Stage 3 — Syntax/POS | ✅ Implemented | spaCy POS/dep, tree-shape serialization, sentence type/voice, POS delta |
-| Stage 4 — Discourse | 🟡 Scaffolded | Placeholder analyser returns empty structures |
-| Stage 5 — Symbolic Encoding | ✅ Implemented | Character + structural streams wired (tree shape, POS deltas, meta) |
+| Stage 4 — Discourse | ✅ Implemented | Longformer coreference + entity symbol encoding; round-trip verified |
+| Stage 5 — Symbolic Encoding | ✅ Implemented | Character + structural + discourse streams wired; round-trip verified |
 | Stage 6 — Probability Model | ✅ Implemented (context-mixing) | 3-level context model + bpb + serialisation |
 | Stage 7 — ANS/GPU Encoding | ✅ Implemented (CPU rANS) | Correct rANS encode/decode + tests; GPU pending |
 | Stage 8 — Decoding | ✅ Implemented | Full decode path + ANS stream reconstruction |
@@ -436,27 +471,19 @@ Using the example sentence **"the old man"**:
 
 ## 11. Next Steps
 
-### Track A — Character layer (can be done in sandbox)
-1. ✅ ~~Develop mixed-radix character representation~~ — done, validated
-2. ✅ ~~Test on real text at scale~~ — done, 2,173 pairs
-3. ✅ ~~Extend to special symbols~~ — done, class 6 assigned
-4. ✅ ~~Integrate decomposed delta encoding~~ — integrated into `stage5_encode` + Track A tests
-5. **Remaining:** Integrate into legacy `compression_test.py` if still required
+### Immediate (start of next session)
+1. **Verify** `Match: True` for full pipeline round-trip after morphology patch — run `python test_round_trip_pipeline.py --chars 10000`
+2. **If more mismatches appear**, repeat the same diagnostic: find the first mismatch character, trace back to which pipeline stage introduces it
+3. **Scale up** round-trip test to 50k, 100k chars once 10k passes cleanly
 
-### Track B — Structural layer (requires local environment with spaCy)
-1. ✅ ~~Prototype Stage 2 morphological analysis~~ — done, 13 codes
-2. ✅ ~~Stage 3 POS tagging and syntactic parsing~~ — implemented with spaCy
-3. ✅ ~~POS delta encoding test~~ — added in Track B tests
-4. ✅ ~~Enumerate symbol alphabet~~ — expanded `symbol_alphabet.py`
-5. ✅ ~~Wire syntax outputs into encoding streams~~ — structural encoder integrated in Stage 5
-6. **Next:** Evaluate structural streams on larger corpora
-7. **Next:** Decide structural symbol ID ordering (fixed vs frequency-based)
+### Track B — Structural layer
+1. Evaluate structural streams on larger corpora
+2. Decide structural symbol ID ordering (fixed vs frequency-based)
 
 ### System integration
-1. **Next:** Stage 4 discourse design (coreference + relation tagging decisions)
-2. **Next:** GPU ANS implementation or CUDA acceleration strategy
-3. **Next:** Finalize interleaved stream layout for binary payload format
-4. **Next:** End-to-end compression benchmarking on FineWeb
+1. GPU ANS implementation or CUDA acceleration strategy
+2. Finalize interleaved stream layout for binary payload format
+3. End-to-end compression benchmarking on FineWeb
 
 ### Hardware note
 Local environment (Nobara Linux, RTX 3060 12GB, Ryzen 5 4600G, 16GB DDR4) is ready for:
@@ -476,7 +503,8 @@ Local environment (Nobara Linux, RTX 3060 12GB, Ryzen 5 4600G, 16GB DDR4) is rea
 - Neural scaling laws paper — [Kaplan et al. 2020](https://arxiv.org/abs/2001.08361)
 - Factoriadic number system — factorial base representation
 - Mixed-radix number systems — generalization of positional notation
+- Longformer — [Beltagy et al. 2020](https://arxiv.org/abs/2004.05150) — used for coreference resolution in Stage 4
 
 ---
 
-*Last updated: March 26, 2026. Session 2 complete.*
+*Last updated: March 28, 2026. Session 3 complete.*
