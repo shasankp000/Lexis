@@ -37,6 +37,10 @@ python3.11 -m venv .venv
 .venv/bin/python -m test_round_trip_pipeline.py
 ```
 
+# Note
+
+- Your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if it's not launched from inside the virtual environment.
+
 # Current testing sources
 
 - Moby Dick (Project Gutenberg)
