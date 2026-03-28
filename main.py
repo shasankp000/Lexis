@@ -221,14 +221,15 @@ def _flatten(nested: List[List[Any]]) -> List[Any]:
     return [item for sub in nested for item in sub]
 
 
-# '"' intentionally absent: double-quote is ambiguous (opening vs closing) in
-# a flat token stream. Keeping it in _ATTACH_LEFT caused opening quotes to glue
-# to the preceding token (e.g. '."while' instead of '. "while'). Closing-quote
-# before punctuation is still handled because punctuation tokens are in
-# _ATTACH_LEFT and attach themselves leftward.
+# Chars that always attach to the token on their left (closing punctuation).
+# '"' is handled separately in _join_words because it is context-dependent:
+# after a sentence boundary it is an opening quote (attaches right),
+# after a word it is a closing quote (attaches left).
 _ATTACH_LEFT = set(".,;:!?)'-—%-/")
-# Only '(' stays in _ATTACH_RIGHT. '"' and "'" removed (see earlier commit).
+# Chars whose right edge glues to the following token with no space.
 _ATTACH_RIGHT = set("($#/")
+# Previous-token endings that signal the next '"' is an opening quote.
+_OPEN_QUOTE_AFTER = set(".!?(— ")
 
 
 def _join_words(words: list[str]) -> str:
@@ -253,6 +254,17 @@ def _join_words(words: list[str]) -> str:
             parts[-1] += word
             continue
         first_char = word[0]
+        # '"' is ambiguous: opening quote attaches to the right (no space
+        # before the next word), closing quote attaches to the left.
+        if first_char == '"':
+            prev_last = parts[-1][-1] if parts[-1] else ""
+            if prev_last in _OPEN_QUOTE_AFTER or not parts[-1]:
+                # opening quote: space before '"', then '"' glues to next word
+                parts.append(' "')
+            else:
+                # closing quote: glue to previous word
+                parts[-1] += '"'
+            continue
         if first_char == "'":
             parts[-1] += word
         elif first_char in _ATTACH_LEFT:
@@ -600,11 +612,11 @@ def analyse(text: str, model: str | None = None) -> None:
     print(f"Model: {model or SPACY_MODEL}")
     print(f"Context-mixing bpb: {bpb_value:.4f}")
 
-    print("Stage 2 \u2014 Morphology")
+    print("Stage 2 — Morphology")
     for key, value in morph_stats.items():
         print(f"  {key}: {value}")
 
-    print("Stage 5 \u2014 Character Encoding")
+    print("Stage 5 — Character Encoding")
     for key, value in encode_stats.items():
         print(f"  {key}: {value}")
 
@@ -618,11 +630,11 @@ def analyse(text: str, model: str | None = None) -> None:
     ]
     pos_huffman_summary = _summarise_pos_huffman(pos_huffman_results, pos_freq_table)
 
-    print("Stage 5 \u2014 POS Huffman Summary")
+    print("Stage 5 — POS Huffman Summary")
     for key, value in pos_huffman_summary.items():
         print(f"  {key}: {value}")
 
-    print("Stage 6 \u2014 Probability Model (Context Mixing)")
+    print("Stage 6 — Probability Model (Context Mixing)")
     print(f"  bpb: {bpb_value}")
     print(f"  char_vocab_size: {len(context_model.char_vocab)}")
     print(f"  morph_vocab_size: {len(context_model.morph_vocab)}")
