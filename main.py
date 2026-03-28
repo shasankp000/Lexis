@@ -32,6 +32,11 @@ from compression.config import (
 from compression.pipeline.stage1_normalize import normalize_text
 from compression.pipeline.stage2_morphology import MorphologicalAnalyser
 from compression.pipeline.stage3_syntax import analyse_sentence
+from compression.pipeline.stage4_discourse import DiscourseAnalyser
+from compression.pipeline.stage5_discourse_symbols import (
+    decode_symbols,
+    encode_symbols,
+)
 from compression.pipeline.stage5_encode import CharacterEncoder, StructuralEncoder
 from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.stage7_arithmetic import ArithmeticDecoder, ArithmeticEncoder
@@ -43,7 +48,6 @@ def _get_nlp(model: str | None = None):
     try:
         import spacy
 
-        # Enable GPU if available (robust across spaCy versions)
         gpu_fn = getattr(spacy, "prefer_gpu", None)
         if gpu_fn is None:
             gpu_fn = getattr(spacy, "require_gpu", None)
@@ -62,6 +66,20 @@ def _get_nlp(model: str | None = None):
         return nlp
     except Exception as exc:
         raise RuntimeError(f"spaCy model '{model_name}' not available: {exc}") from exc
+
+
+def _run_discourse(text: str, device: str = "cpu") -> tuple[str, dict]:
+    """
+    Run Stage 4 (coreference resolution) + Stage 5 (symbol encoding).
+
+    Returns (compressed_text, symbol_table). The compressed_text has repeated
+    named-entity mentions replaced with §E{n} symbols. The symbol_table is
+    needed at decode time to restore the original text.
+    """
+    analyser = DiscourseAnalyser(use_spacy=True, device=device)
+    stage4_result = analyser.analyse_document(text)
+    compressed, symbol_table = encode_symbols(text, stage4_result)
+    return compressed, symbol_table
 
 
 def _encode_for_model(
@@ -92,7 +110,7 @@ def _encode_for_model(
     encoded_sentences: list[dict] = []
     for morphology, syntax in tqdm(
         sentence_data, desc="Stage 5 — Encoding sentences", unit="sent"
-    ):  # ← ADD
+    ):
         encoded_sentences.append(
             char_encoder.encode_sentence_full(
                 morphology, syntax, structural_encoder, freq_table
@@ -216,18 +234,15 @@ def _join_words(words: list[str]) -> str:
     for word in words[1:]:
         if not word:
             continue
-        # If previous token ended with asterisk, attach consecutive asterisks (***)
         if word == "*":
             if parts[-1].endswith("*"):
                 parts[-1] += word
             else:
                 parts.append(" " + word)
             continue
-        # If previous token ended with hyphen/slash, attach next word directly
         if parts[-1].endswith(("-", "/")):
             parts[-1] += word
             continue
-        # If previous token ends with a right-attaching opener (e.g., "(", "#")
         if parts[-1] and parts[-1][-1] in _ATTACH_RIGHT:
             parts[-1] += word
             continue
@@ -321,18 +336,30 @@ def _build_encoded_sentences_from_metadata(payload: Dict[str, Any]) -> List[Dict
 def compress(text: str, output_path: str, model: str | None = None) -> Dict:
     """Run full available pipeline on text. Return stats."""
     normalized = normalize_text(text)
+
+    # Stage 4+5: discourse symbol encoding
+    print("[Stage 4+5] Running discourse analysis and symbol encoding...")
+    discourse_compressed, symbol_table = _run_discourse(normalized)
+    print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
+
+    # Remaining stages operate on the discourse-compressed text
     analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
-    morphology = analyser.analyse_sentence(normalized)
+    morphology = analyser.analyse_sentence(discourse_compressed)
 
     encoder = CharacterEncoder()
-    stats = encoder.stats(normalized)
+    stats = encoder.stats(discourse_compressed)
 
-    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
+    encoded_sentences, pos_freq_table = _encode_for_model(
+        discourse_compressed, model=model
+    )
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
-    bpb_value = context_model.bpb(normalized, _EncodedPipeline(encoded_sentences))
+    bpb_value = context_model.bpb(
+        discourse_compressed, _EncodedPipeline(encoded_sentences)
+    )
 
     payload = {
+        "symbol_table": symbol_table,
         "morphology": [
             {"original": original, "root": root, "code": code}
             for original, root, code in morphology
@@ -360,9 +387,26 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
 def compress_to_file(text: str, output_path: str, model: str | None = None) -> Dict:
     """
     Full compression pipeline with arithmetic coding.
+    Stage 4+5 (discourse symbol encoding) runs first, then all subsequent
+    stages operate on the symbol-compressed text. The symbol table is stored
+    in the msgpack payload for lossless reconstruction at decompress time.
     """
     normalized = normalize_text(text)
-    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
+
+    # Stage 4+5: discourse symbol encoding
+    print("[Stage 4+5] Running discourse analysis and symbol encoding...")
+    discourse_compressed, symbol_table = _run_discourse(normalized)
+    print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
+    orig_len = len(normalized)
+    disc_len = len(discourse_compressed)
+    print(
+        f"[Stage 4+5] Text length: {orig_len} → {disc_len} "
+        f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
+    )
+
+    encoded_sentences, pos_freq_table = _encode_for_model(
+        discourse_compressed, model=model
+    )
 
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
@@ -395,6 +439,8 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
     pos_deltas_stream = encoder.encode_unigram_counts(char_pos_deltas, pos_delta_counts)
 
     metadata = {
+        # Stage 4+5 symbol table — required for decode
+        "symbol_table": symbol_table,
         "compressed_bitstream": compressed_bytes,
         "pos_deltas_bitstream": pos_deltas_stream,
         "pos_deltas_counts": {int(k): int(v) for k, v in pos_delta_counts.items()},
@@ -437,6 +483,10 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
         "compressed_size": compressed_size,
         "compression_ratio": compressed_size / original_size if original_size else 0.0,
         "bpb": (compressed_size * 8) / original_size if original_size else 0.0,
+        "discourse_symbols": len(symbol_table),
+        "discourse_reduction_pct": round(100 * (orig_len - disc_len) / orig_len, 2)
+        if orig_len
+        else 0.0,
     }
 
 
@@ -448,6 +498,9 @@ def decompress(input_path: str) -> str:
         payload = msgpack.unpackb(raw, raw=False, strict_map_key=False)
     except Exception:
         payload = json.loads(raw.decode("utf-8"))
+
+    # Retrieve symbol table for Stage 4+5 decode (may be absent in old payloads)
+    symbol_table: dict = payload.get("symbol_table", {})
 
     if isinstance(payload, dict) and "compressed_bitstream" in payload:
         context_model = _build_context_model(payload)
@@ -475,13 +528,19 @@ def decompress(input_path: str) -> str:
         char_stream = _reconstruct_chars(char_classes, pos_deltas, sentence_counts)
         roots = _split_roots(char_stream)
 
-        morph_codes = _flatten(payload.get("morph_codes", []))
+        morph_codes_flat = _flatten(payload.get("morph_codes", []))
         words = [
-            apply_morph(root, morph_codes[idx] if idx < len(morph_codes) else 0)
+            apply_morph(root, morph_codes_flat[idx] if idx < len(morph_codes_flat) else 0)
             for idx, root in enumerate(roots)
         ]
         result = _join_words(words)
-        return result[0].upper() + result[1:] if result else result
+        result = result[0].upper() + result[1:] if result else result
+
+        # Stage 4+5 decode: restore symbols back to original surfaces
+        if symbol_table:
+            result = decode_symbols(result, symbol_table)
+
+        return result
 
     if isinstance(payload, dict) and "morphology" in payload:
         words = [
@@ -489,25 +548,43 @@ def decompress(input_path: str) -> str:
             for entry in payload.get("morphology", [])
         ]
         result = _join_words(words)
-        return result[0].upper() + result[1:] if result else result
+        result = result[0].upper() + result[1:] if result else result
+        if symbol_table:
+            result = decode_symbols(result, symbol_table)
+        return result
 
-    result = ""
-    return result[0].upper() + result[1:] if result else result
+    return ""
 
 
 def analyse(text: str, model: str | None = None) -> None:
     """Run pipeline in analysis mode — print stats at each stage."""
     normalized = normalize_text(text)
+
+    # Stage 4+5
+    print("[Stage 4+5] Running discourse analysis...")
+    discourse_compressed, symbol_table = _run_discourse(normalized)
+    orig_tokens = len(normalized.split())
+    comp_tokens = len(discourse_compressed.split())
+    print(f"[Stage 4+5] Symbols: {len(symbol_table)}")
+    print(
+        f"[Stage 4+5] Token reduction: {orig_tokens} → {comp_tokens} "
+        f"({100*(orig_tokens-comp_tokens)/orig_tokens:.2f}%)"
+    )
+
     analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
-    morph_stats = analyser.char_savings(normalized)
+    morph_stats = analyser.char_savings(discourse_compressed)
 
     encoder = CharacterEncoder()
-    encode_stats = encoder.stats(normalized)
+    encode_stats = encoder.stats(discourse_compressed)
 
-    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
+    encoded_sentences, pos_freq_table = _encode_for_model(
+        discourse_compressed, model=model
+    )
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
-    bpb_value = context_model.bpb(normalized, _EncodedPipeline(encoded_sentences))
+    bpb_value = context_model.bpb(
+        discourse_compressed, _EncodedPipeline(encoded_sentences)
+    )
 
     print(f"Model: {model or SPACY_MODEL}")
     print(f"Context-mixing bpb: {bpb_value:.4f}")
@@ -539,9 +616,6 @@ def analyse(text: str, model: str | None = None) -> None:
     print(f"  char_vocab_size: {len(context_model.char_vocab)}")
     print(f"  morph_vocab_size: {len(context_model.morph_vocab)}")
     print(f"  pos_vocab_size: {len(context_model.pos_vocab)}")
-    print(f"  char_context_size: {CHAR_CONTEXT_SIZE}")
-    print(f"  morph_context_size: {MORPH_CONTEXT_SIZE}")
-    print(f"  struct_context_size: {STRUCT_CONTEXT_SIZE}")
     print(f"  weights: {[round(w, 4) for w in context_model.weights]}")
 
 
@@ -557,24 +631,17 @@ def main() -> None:
 
     compress_parser = subparsers.add_parser("compress", help="Compress input text")
     compress_parser.add_argument("input", help="Input text file")
-    compress_parser.add_argument("output", help="Output binary file (JSON for now)")
+    compress_parser.add_argument("output", help="Output binary file")
     compress_parser.add_argument(
-        "--model",
-        default=None,
-        help="spaCy model to use. Overrides the default in config.py.",
+        "--model", default=None, help="spaCy model to use."
     )
 
     decompress_parser = subparsers.add_parser("decompress", help="Decompress archive")
-    decompress_parser.add_argument("input", help="Input binary file (JSON for now)")
+    decompress_parser.add_argument("input", help="Input binary file")
 
     analyse_parser = subparsers.add_parser("analyse", help="Analyse input text")
     analyse_parser.add_argument("input", help="Input text file")
-    analyse_parser.add_argument(
-        "--model",
-        default=None,
-        help="spaCy model to use (e.g. en_core_web_lg, en_core_web_trf). "
-        "Overrides the default in config.py.",
-    )
+    analyse_parser.add_argument("--model", default=None)
 
     args = parser.parse_args()
 
