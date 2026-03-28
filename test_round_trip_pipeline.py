@@ -88,7 +88,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    raw = open("moby_dick.txt", encoding="utf-8").read()
+    # utf-8-sig strips the UTF-8 BOM (\ufeff) automatically if present
+    raw = open("moby_dick.txt", encoding="utf-8-sig").read()
     if args.chars:
         raw = raw[:args.chars]
 
