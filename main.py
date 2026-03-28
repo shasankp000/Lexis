@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, cast
@@ -231,10 +230,6 @@ _ATTACH_LEFT = set(".,;:!?)'-—%-/")
 # Only '(' stays in _ATTACH_RIGHT. '"' and "'" removed (see earlier commit).
 _ATTACH_RIGHT = set("($#/")
 
-# Inserts a space between a straight double-quote and a directly following
-# letter, covering the closing-quote-before-word case (e.g. '"word' -> '" word').
-_QUOTE_WORD_RE = re.compile(r'(["\`])([A-Za-z])')
-
 
 def _join_words(words: list[str]) -> str:
     """Join tokens intelligently, suppressing spaces around punctuation."""
@@ -269,7 +264,6 @@ def _join_words(words: list[str]) -> str:
     result = result.replace("( ", "(").replace(" )", ")")
     result = result.replace("[ ", "[").replace(" ]", "]")
     result = result.replace(" — ", "—")
-    result = _QUOTE_WORD_RE.sub(r"\1 \2", result)
     return result.strip()
 
 
@@ -416,7 +410,7 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
     orig_len = len(normalized)
     disc_len = len(discourse_compressed)
     print(
-        f"[Stage 4+5] Text length: {orig_len} → {disc_len} "
+        f"[Stage 4+5] Text length: {orig_len} \u2192 {disc_len} "
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
@@ -586,7 +580,7 @@ def analyse(text: str, model: str | None = None) -> None:
     comp_tokens = len(discourse_compressed.split())
     print(f"[Stage 4+5] Symbols: {len(symbol_table)}")
     print(
-        f"[Stage 4+5] Token reduction: {orig_tokens} → {comp_tokens} "
+        f"[Stage 4+5] Token reduction: {orig_tokens} \u2192 {comp_tokens} "
         f"({100*(orig_tokens-comp_tokens)/orig_tokens:.2f}%)"
     )
 
@@ -606,11 +600,11 @@ def analyse(text: str, model: str | None = None) -> None:
     print(f"Model: {model or SPACY_MODEL}")
     print(f"Context-mixing bpb: {bpb_value:.4f}")
 
-    print("Stage 2 — Morphology")
+    print("Stage 2 \u2014 Morphology")
     for key, value in morph_stats.items():
         print(f"  {key}: {value}")
 
-    print("Stage 5 — Character Encoding")
+    print("Stage 5 \u2014 Character Encoding")
     for key, value in encode_stats.items():
         print(f"  {key}: {value}")
 
@@ -624,11 +618,11 @@ def analyse(text: str, model: str | None = None) -> None:
     ]
     pos_huffman_summary = _summarise_pos_huffman(pos_huffman_results, pos_freq_table)
 
-    print("Stage 5 — POS Huffman Summary")
+    print("Stage 5 \u2014 POS Huffman Summary")
     for key, value in pos_huffman_summary.items():
         print(f"  {key}: {value}")
 
-    print("Stage 6 — Probability Model (Context Mixing)")
+    print("Stage 6 \u2014 Probability Model (Context Mixing)")
     print(f"  bpb: {bpb_value}")
     print(f"  char_vocab_size: {len(context_model.char_vocab)}")
     print(f"  morph_vocab_size: {len(context_model.morph_vocab)}")
