@@ -11,7 +11,7 @@ Round-trip guarantee: decode_symbols(encode_symbols(text, stage4)[0], stage4) ==
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -31,42 +31,68 @@ MentionTuple = Tuple  # 3-tuple or 5-tuple
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _find_all_occurrences(
+    text: str, surface: str
+) -> List[Tuple[int, int]]:
+    """
+    Find every non-overlapping occurrence of `surface` in `text`.
+    Returns list of (char_start, char_end) sorted ascending.
+    """
+    results = []
+    pattern = re.escape(surface)
+    for m in re.finditer(pattern, text):
+        results.append((m.start(), m.end()))
+    return results
+
+
 def _get_char_offsets(
     text: str,
     mentions: List[MentionTuple],
 ) -> List[Tuple[int, int, str]]:
     """
-    Resolve (sent_idx, token_idx, surface) tuples to absolute char offsets.
+    Resolve (sent_idx, token_idx, surface) mention tuples to absolute char offsets.
 
-    If the tuple already contains (sent_idx, token_idx, surface, char_start, char_end)
-    the stored offsets are used directly. Otherwise we find each surface string
-    using regex, left-to-right, advancing a search cursor so we never match the
-    same span twice.
+    Strategy:
+      - If Stage 4 already provides 5-tuples with char spans, use them directly.
+      - Otherwise, for each unique surface form find ALL occurrences in the text,
+        then greedily assign each mention to the earliest unassigned occurrence.
+        This ensures mentions are matched in true document order regardless of
+        the order Stage 4 emits them.
 
     Returns list of (char_start, char_end, surface), sorted by char_start ascending.
     """
-    resolved: List[Tuple[int, int, str]] = []
-
     # Check whether Stage 4 already provides char spans (5-tuple)
     has_offsets = mentions and len(mentions[0]) >= 5
 
     if has_offsets:
-        for m in mentions:
-            _, _, surface, char_start, char_end = m[:5]
+        resolved = [
+            (m[3], m[4], m[2]) for m in mentions
+        ]
+        return sorted(resolved, key=lambda x: x[0])
+
+    # --- Fallback: match by surface using all-occurrences approach ---
+    # Group mentions by surface so we can assign them left-to-right per surface.
+    # Build a pool: surface -> sorted list of (char_start, char_end) occurrences
+    surface_pool: Dict[str, List[Tuple[int, int]]] = {}
+    for m in mentions:
+        surface = m[2]
+        if surface not in surface_pool:
+            surface_pool[surface] = _find_all_occurrences(text, surface)
+
+    # Assign each mention to the next available occurrence of its surface,
+    # consuming occurrences left-to-right.
+    surface_cursors: Dict[str, int] = {s: 0 for s in surface_pool}
+    resolved: List[Tuple[int, int, str]] = []
+
+    for m in mentions:
+        surface = m[2]
+        pool = surface_pool[surface]
+        idx = surface_cursors[surface]
+        if idx < len(pool):
+            char_start, char_end = pool[idx]
             resolved.append((char_start, char_end, surface))
-    else:
-        # Fallback: regex search advancing a cursor
-        cursor = 0
-        for m in mentions:
-            surface = m[2]
-            # Escape surface for regex, match whole-word boundary where possible
-            pattern = re.escape(surface)
-            match = re.search(pattern, text[cursor:])
-            if match:
-                abs_start = cursor + match.start()
-                abs_end = cursor + match.end()
-                resolved.append((abs_start, abs_end, surface))
-                cursor = abs_end  # advance so we don't match the same span again
+            surface_cursors[surface] = idx + 1
+        # If we run out of occurrences (shouldn't happen), skip this mention
 
     return sorted(resolved, key=lambda x: x[0])
 
@@ -91,16 +117,22 @@ def _resolve_relation_offsets(
             _, _, connective, rel_type, char_start, char_end = r[:6]
             resolved.append((char_start, char_end, connective, rel_type))
     else:
-        cursor = 0
+        # Build pools per connective surface
+        connective_pool: Dict[str, List[Tuple[int, int]]] = {}
+        for r in relations:
+            connective = r[2]
+            if connective not in connective_pool:
+                connective_pool[connective] = _find_all_occurrences(text, connective)
+
+        connective_cursors: Dict[str, int] = {c: 0 for c in connective_pool}
         for r in relations:
             connective, rel_type = r[2], r[3]
-            pattern = re.escape(connective)
-            match = re.search(pattern, text[cursor:], re.IGNORECASE)
-            if match:
-                abs_start = cursor + match.start()
-                abs_end = cursor + match.end()
-                resolved.append((abs_start, abs_end, connective, rel_type))
-                cursor = abs_end
+            pool = connective_pool[connective]
+            idx = connective_cursors[connective]
+            if idx < len(pool):
+                char_start, char_end = pool[idx]
+                resolved.append((char_start, char_end, connective, rel_type))
+                connective_cursors[connective] = idx + 1
 
     return sorted(resolved, key=lambda x: x[0])
 
@@ -125,13 +157,8 @@ def build_symbol_table(stage4_result: Dict) -> SymbolTable:
             surface = mentions[0][2]
             table[f"§E{eid}"] = surface
 
-    seen_rel_types: Dict[str, int] = {}
     for ridx, rel in enumerate(stage4_result.get("discourse_relations", [])):
         connective = rel[2]
-        rel_type = rel[3]
-        key = rel_type
-        if key not in seen_rel_types:
-            seen_rel_types[key] = ridx
         table[f"§R{ridx}"] = connective
 
     return table
@@ -147,18 +174,16 @@ def encode_symbols(
     with compact symbols.
 
     Rules:
-      - First mention of each entity chain is kept as-is (becomes the anchor).
+      - Mentions are resolved to document order (ascending char offset).
+      - The first mention in document order is kept as the anchor.
       - All subsequent mentions are replaced with §E{entity_id}.
-      - Discourse connectives are replaced with §R{ridx} only when
-        encode_relations=True (off by default — adds noise on short texts).
-      - Replacements are applied right-to-left by char offset so earlier
-        offsets remain valid throughout.
+      - Discourse connectives replaced with §R{ridx} only when encode_relations=True.
+      - Replacements applied right-to-left so earlier offsets stay valid.
 
     Returns:
       (compressed_text, symbol_table)
     """
     symbol_table: SymbolTable = {}
-    # List of (char_start, char_end, replacement_string)
     ops: List[Tuple[int, int, str]] = []
 
     # --- Entity substitutions ---
@@ -166,16 +191,17 @@ def encode_symbols(
         if not mentions:
             continue
 
+        # Resolve to document order — critical: anchor is earliest in text, not Stage 4 order
         resolved = _get_char_offsets(text, mentions)
         if not resolved:
             continue
 
         symbol = f"§E{eid}"
-        # First resolved mention = anchor; store canonical surface in symbol table
-        anchor_start, anchor_end, anchor_surface = resolved[0]
+        # First in document order = anchor
+        _, _, anchor_surface = resolved[0]
         symbol_table[symbol] = anchor_surface
 
-        # All subsequent resolved mentions get substituted
+        # All subsequent occurrences get substituted
         for char_start, char_end, _ in resolved[1:]:
             ops.append((char_start, char_end, symbol))
 
@@ -245,14 +271,13 @@ def validate_round_trip(
 
     round_trip_ok = decoded == original
 
-    first_mismatch: int | None = None
+    first_mismatch: Optional[int] = None
     if not round_trip_ok:
         for i, (a, b) in enumerate(zip(decoded, original)):
             if a != b:
                 first_mismatch = i
                 break
         if first_mismatch is None:
-            # One string is a prefix of the other
             first_mismatch = min(len(decoded), len(original))
 
     orig_tokens = len(original.split())
