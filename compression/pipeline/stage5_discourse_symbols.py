@@ -7,10 +7,11 @@ Takes Stage 4 output (coreference_chains + discourse_relations) and produces:
 
 Round-trip guarantee: decode_symbols(encode_symbols(text, stage4)[0], stage4) == text
 
-NOTE: Pronoun substitution (He/Him/She/They etc.) is intentionally disabled until
-Stage 4 is updated to emit absolute character offsets. Pronouns are too ambiguous to
-resolve safely from (sent_idx, token_idx) tuples when text is chunked. Only exact
-named-entity / noun-phrase repeats are substituted, which is still valid compression.
+NOTE: When Stage 4 emits 3-tuples (sent_idx, token_idx, surface), pronoun substitution
+is fully disabled. Any chain containing a pronoun mention is skipped entirely because
+sent_idx is chunk-relative and cannot be safely mapped to global char positions.
+Once Stage 4 is updated to emit 5-tuples with absolute char spans, pronoun
+substitution re-enables automatically via the has_offsets path.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ _WORD_CHAR = re.compile(r"\w")
 def _find_all_occurrences(text: str, surface: str) -> List[Tuple[int, int]]:
     """
     Find every occurrence of `surface` in `text` that is NOT a strict prefix
-    of a longer token or a possessive stem.
+    of a longer token or a possessive stem (e.g. The Whale inside The Whale's).
     """
     results = []
     for m in re.finditer(re.escape(surface), text):
@@ -55,20 +56,21 @@ def _find_all_occurrences(text: str, surface: str) -> List[Tuple[int, int]]:
     return results
 
 
+def _chain_has_pronoun(mentions: List[MentionTuple]) -> bool:
+    """Return True if any mention surface in the chain is a pronoun."""
+    return any(m[2].strip() in PRONOUNS for m in mentions)
+
+
 def _get_char_offsets(
     text: str,
     mentions: List[MentionTuple],
-    named_only: bool = False,
 ) -> List[Tuple[int, int, str]]:
     """
     Resolve mention tuples to (char_start, char_end, surface), sorted by char_start.
 
-    If Stage 4 provides 5-tuples with absolute char spans, use them directly —
-    this is the safe path and enables pronoun substitution.
-
-    Otherwise (3-tuple fallback): build an occurrence pool per surface and consume
-    left-to-right. When named_only=True, pronoun surfaces are skipped entirely
-    to avoid cross-chunk sentence-index mismatches.
+    If Stage 4 provides 5-tuples with absolute char spans, use them directly.
+    Otherwise build an occurrence pool per surface and consume left-to-right.
+    Pronouns should already be filtered out before calling this (see encode_symbols).
     """
     has_offsets = mentions and len(mentions[0]) >= 5
 
@@ -76,12 +78,9 @@ def _get_char_offsets(
         resolved = [(m[3], m[4], m[2]) for m in mentions]
         return sorted(resolved, key=lambda x: x[0])
 
-    # Build pool per surface
     surface_pool: Dict[str, List[Tuple[int, int]]] = {}
     for m in mentions:
         surface = m[2]
-        if named_only and surface.strip() in PRONOUNS:
-            continue
         if surface not in surface_pool:
             surface_pool[surface] = _find_all_occurrences(text, surface)
 
@@ -90,8 +89,6 @@ def _get_char_offsets(
 
     for m in mentions:
         surface = m[2]
-        if surface not in surface_pool:
-            continue  # skipped (pronoun in named_only mode)
         pool = surface_pool[surface]
         idx = surface_cursors[surface]
         if idx < len(pool):
@@ -167,31 +164,34 @@ def encode_symbols(
     Replace repeated named-entity mentions (and optionally discourse connectives)
     with compact symbols. Lossless: decode_symbols(result, table) == text.
 
-    Pronoun mentions (He/Him/She/They etc.) are skipped when Stage 4 does not
-    provide absolute char offsets, because (sent_idx, token_idx) tuples are
-    chunk-relative and cannot be safely resolved to global positions.
+    In 3-tuple mode (Stage 4 without absolute offsets): any chain that contains
+    even one pronoun mention is skipped entirely. This is because sent_idx values
+    are chunk-relative and we cannot safely locate pronouns globally.
 
-    Once Stage 4 is updated to emit 5-tuples with absolute char spans, pronoun
-    substitution will be enabled automatically via the has_offsets path.
+    In 5-tuple mode (Stage 4 with absolute char spans): pronoun substitution is
+    fully enabled since spans are unambiguous.
     """
     symbol_table: SymbolTable = {}
     ops: List[Tuple[int, int, str]] = []
 
-    # Detect whether Stage 4 provides absolute offsets
     chains = stage4_result.get("coreference_chains", {})
+
+    # Detect whether Stage 4 provides absolute offsets on any chain
     has_absolute_offsets = any(
         mentions and len(mentions[0]) >= 5
         for mentions in chains.values()
     )
-    # Use named_only mode when we only have relative 3-tuples
-    named_only = not has_absolute_offsets
 
     for eid, mentions in chains.items():
         if not mentions:
             continue
-        resolved = _get_char_offsets(text, mentions, named_only=named_only)
+
+        # In 3-tuple mode: skip any chain that contains a pronoun mention
+        if not has_absolute_offsets and _chain_has_pronoun(mentions):
+            continue
+
+        resolved = _get_char_offsets(text, mentions)
         if len(resolved) < 2:
-            # Need at least anchor + 1 substitution to be worth encoding
             continue
 
         symbol = f"§E{eid}"
