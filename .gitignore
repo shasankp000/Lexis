@@ -6,4 +6,4 @@ compression/tests/__pycache__/
 compression/alphabet/__pycache__/
 .pytest_cache
 .venv*/
-test*.bin
+*.bin
