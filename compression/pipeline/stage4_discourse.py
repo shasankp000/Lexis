@@ -86,56 +86,78 @@ PRONOUNS: Set[str] = {
 }
 
 
-def is_compression_worthy(mentions: List[Tuple[int, int, str]]) -> bool:
+def is_compression_worthy(mentions: List[Tuple]) -> bool:
+    """
+    Decide whether a coreference chain is worth encoding.
+
+    A chain is worthy if:
+      - It has 2+ mentions (required for any substitution)
+      - It is not dominated by boilerplate terms
+      - Average mention length is reasonable (< 25 chars)
+      - It has at least 2 distinct surface forms OR at least 2 identical
+        named-entity repeats (pure-named chains like [Ahab, Ahab] are valid)
+
+    NOTE: The old requirement that a chain MUST contain a pronoun has been
+    removed. Pure named-entity repeat chains are compression-worthy too.
+    """
     surfaces = [m[2].lower().strip() for m in mentions]
 
-    # 1. Must have 2+ unique surface forms
-    unique_surfaces = set(surfaces)
-    if len(unique_surfaces) < 2:
+    if len(mentions) < 2:
         return False
 
-    # 2. Skip chains dominated by boilerplate
+    # Skip boilerplate-dominated chains
     boilerplate_count = sum(
         any(term in s for term in BOILERPLATE_TERMS) for s in surfaces
     )
     if boilerplate_count / len(surfaces) > 0.5:
         return False
 
-    # 3. Avg mention length should be short
+    # Skip very long average mention surfaces
     avg_len = sum(len(s) for s in surfaces) / len(surfaces)
     if avg_len > 25:
-        return False
-
-    # 4. Must include at least one pronoun
-    has_pronoun = any(s in PRONOUNS for s in surfaces)
-    if not has_pronoun:
         return False
 
     return True
 
 
-def _chunk_at_sentences(text: str, max_chars: int) -> List[str]:
-    """Split text into chunks of ~max_chars, breaking at sentence boundaries."""
+def _chunk_at_sentences(text: str, max_chars: int) -> List[Tuple[str, int]]:
+    """
+    Split text into chunks of ~max_chars, breaking at sentence boundaries.
+
+    Returns list of (chunk_text, chunk_char_offset) so callers can map
+    chunk-relative char positions back to absolute document positions.
+    """
     import re
 
     sentences = re.split(r"(?<=[.!?])\s+", text)
-    chunks: List[str] = []
+    chunks: List[Tuple[str, int]] = []
     current = ""
+    current_offset = 0
+    pos = 0
 
     for sent in sentences:
+        # Find where this sentence starts in the original text
+        sent_pos = text.index(sent, pos)
         if len(current) + len(sent) > max_chars and current:
-            chunks.append(current.strip())
+            chunks.append((current.strip(), current_offset))
             current = sent
+            current_offset = sent_pos
         else:
-            current += " " + sent
+            if not current:
+                current_offset = sent_pos
+            current += " " + sent if current else sent
+        pos = sent_pos + len(sent)
 
     if current:
-        chunks.append(current.strip())
+        chunks.append((current.strip(), current_offset))
 
     return chunks
 
 
-def extract_coreference_chains(doc: Any) -> Dict[int, List[Tuple[int, int, str]]]:
+def extract_coreference_chains(
+    doc: Any,
+    chunk_char_offset: int = 0,
+) -> Dict[int, List[Tuple[int, int, str, int, int]]]:
     """
     Extract coreference chains from a fastcoref-processed spaCy doc.
 
@@ -143,16 +165,22 @@ def extract_coreference_chains(doc: Any) -> Dict[int, List[Tuple[int, int, str]]
         [[(char_start, char_end), ...], ...]
 
     Returns:
-        Dict mapping entity_id -> [(sent_idx, token_idx, surface_text), ...]
+        Dict mapping entity_id -> [
+            (sent_idx, token_idx, surface_text, abs_char_start, abs_char_end),
+            ...
+        ]
+
+    char offsets are ABSOLUTE (relative to the full document), computed by
+    adding chunk_char_offset to the chunk-relative fastcoref offsets.
     """
-    chains: Dict[int, List[Tuple[int, int, str]]] = {}
+    chains: Dict[int, List[Tuple[int, int, str, int, int]]] = {}
 
     if not hasattr(doc._, "coref_clusters") or not doc._.coref_clusters:
         return chains
 
     for entity_id, cluster in enumerate(doc._.coref_clusters):
-        seen: set[tuple[int, int, str]] = set()
-        mentions: List[Tuple[int, int, str]] = []
+        seen: set = set()
+        mentions: List[Tuple[int, int, str, int, int]] = []
 
         for char_start, char_end in cluster:
             span = doc.char_span(char_start, char_end, alignment_mode="expand")
@@ -166,10 +194,14 @@ def extract_coreference_chains(doc: Any) -> Dict[int, List[Tuple[int, int, str]]
             token_idx = span.start - sents[sent_idx].start
             surface = doc.text[char_start:char_end]
 
+            # Absolute char offsets in the full document
+            abs_start = chunk_char_offset + char_start
+            abs_end = chunk_char_offset + char_end
+
             key = (sent_idx, token_idx, surface.lower())
             if key not in seen:
                 seen.add(key)
-                mentions.append((sent_idx, token_idx, surface))
+                mentions.append((sent_idx, token_idx, surface, abs_start, abs_end))
 
         if len(mentions) > 1 and is_compression_worthy(mentions):
             chains[entity_id] = mentions
@@ -255,20 +287,21 @@ class DiscourseAnalyser:
         if not self.nlp:
             return {"coreference_chains": {}, "discourse_relations": []}
 
-        all_chains: Dict[int, List[Tuple[int, int, str]]] = {}
+        all_chains: Dict[int, List[Tuple]] = {}
         all_relations: List[Tuple[int, int, str, str]] = []
         entity_offset = 0
 
         chunks = _chunk_at_sentences(text, MAX_CHARS)
-        for chunk in chunks:
+        for chunk_text, chunk_char_offset in chunks:
             try:
                 doc = self.nlp(
-                    chunk, component_cfg={"fastcoref": {"resolve_text": True}}
+                    chunk_text,
+                    component_cfg={"fastcoref": {"resolve_text": True}},
                 )
             except Exception:
-                doc = self.nlp(chunk)
+                doc = self.nlp(chunk_text)
 
-            chunk_chains = extract_coreference_chains(doc)
+            chunk_chains = extract_coreference_chains(doc, chunk_char_offset)
             for eid, mentions in chunk_chains.items():
                 all_chains[entity_offset + eid] = mentions
             entity_offset += len(chunk_chains)
@@ -281,7 +314,6 @@ class DiscourseAnalyser:
         Analyse a single sentence.
 
         Note: coreference across sentences won't be detected in single-sentence mode.
-        Use analyse_document for cross-sentence chains.
         """
         if not self.nlp:
             return {"coreference_chains": {}, "discourse_relations": []}
@@ -292,6 +324,6 @@ class DiscourseAnalyser:
             doc = self.nlp(text)
 
         return {
-            "coreference_chains": extract_coreference_chains(doc),
+            "coreference_chains": extract_coreference_chains(doc, 0),
             "discourse_relations": extract_discourse_relations(doc),
         }
