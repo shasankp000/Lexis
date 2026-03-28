@@ -164,14 +164,16 @@ def encode_symbols(
     encode_relations: bool = False,
 ) -> Tuple[str, SymbolTable]:
     """
-    Replace repeated named-entity mentions (and optionally discourse connectives)
-    with compact symbols. Lossless: decode_symbols(result, table) == text.
+    Replace repeated named-entity mentions with compact symbols.
+    Lossless: decode_symbols(result, table) == text.
 
-    Pronoun mentions are always skipped — they are never substituted regardless
-    of whether Stage 4 provides 3-tuples or 5-tuples. This ensures:
-      - No ambiguous pronoun-to-entity mapping errors
-      - Round-trip safety even for mixed pronoun/entity chains
-      - Only unambiguous named-entity / noun-phrase repeats are compressed
+    Rules:
+    - Pronoun mentions are always skipped (never substituted).
+    - Only mentions whose surface EXACTLY matches the anchor surface are
+      substituted. Mentions with different casing or form (e.g. 'the Whale's'
+      vs 'The Whale's') are left in place to preserve round-trip fidelity.
+    - A chain must have at least 2 mentions with the exact anchor surface
+      (anchor + 1 duplicate) to qualify for substitution.
     """
     symbol_table: SymbolTable = {}
     ops: List[Tuple[int, int, str]] = []
@@ -182,18 +184,30 @@ def encode_symbols(
         if not mentions:
             continue
 
-        # Always skip pronouns — safe in both 3-tuple and 5-tuple modes
         resolved = _get_char_offsets(text, mentions, skip_pronouns=True)
         if len(resolved) < 2:
-            # Need anchor + at least one substitution
+            continue
+
+        anchor_idx = _pick_anchor(resolved)
+        anchor_surface = resolved[anchor_idx][2]
+
+        # Only substitute mentions that are exact duplicates of the anchor surface
+        exact_matches = [
+            (cs, ce, surf)
+            for cs, ce, surf in resolved
+            if surf == anchor_surface
+        ]
+
+        # Need anchor + at least one other exact match to be worth encoding
+        if len(exact_matches) < 2:
             continue
 
         symbol = f"§E{eid}"
-        anchor_idx = _pick_anchor(resolved)
-        symbol_table[symbol] = resolved[anchor_idx][2]
+        symbol_table[symbol] = anchor_surface
 
-        for i, (char_start, char_end, _) in enumerate(resolved):
-            if i != anchor_idx:
+        # Substitute all exact matches except the first occurrence (the anchor)
+        for i, (char_start, char_end, _) in enumerate(exact_matches):
+            if i != 0:
                 ops.append((char_start, char_end, symbol))
 
     if encode_relations:
