@@ -92,7 +92,7 @@ def is_compression_worthy(mentions: List[Tuple]) -> bool:
 
     A chain is worthy if it has 2+ mentions, is not boilerplate-dominated,
     and has a reasonable average mention length. Pure named-entity repeat
-    chains (e.g. [Ahab, Ahab]) are valid — no pronoun requirement.
+    chains are valid — no pronoun requirement.
     """
     surfaces = [m[2].lower().strip() for m in mentions]
 
@@ -116,31 +116,44 @@ def _chunk_at_sentences(text: str, max_chars: int) -> List[Tuple[str, int]]:
     """
     Split text into chunks of ~max_chars, breaking at sentence boundaries.
 
-    Returns list of (chunk_text, chunk_char_offset) so callers can map
-    chunk-relative char positions to absolute document positions.
+    Returns list of (chunk_text, chunk_char_offset) where chunk_char_offset
+    is the absolute position of the FIRST CHARACTER of chunk_text in `text`.
+
+    IMPORTANT: chunks are NOT stripped — we preserve exact text so that
+    fastcoref char offsets (which are relative to the chunk string) map
+    correctly to absolute document positions via chunk_char_offset.
     """
     import re
 
     sentences = re.split(r"(?<=[.!?])\s+", text)
     chunks: List[Tuple[str, int]] = []
-    current = ""
-    current_offset = 0
-    pos = 0
+    current_parts: List[str] = []
+    current_offset: int = 0
+    current_len: int = 0
+    pos: int = 0
 
     for sent in sentences:
         sent_pos = text.index(sent, pos)
-        if len(current) + len(sent) > max_chars and current:
-            chunks.append((current.strip(), current_offset))
-            current = sent
+
+        if current_len + len(sent) > max_chars and current_parts:
+            # Flush current chunk — join with single space to match split behaviour
+            chunk_text = " ".join(current_parts)
+            # chunk_char_offset is where the first sentence of this chunk starts
+            chunks.append((chunk_text, current_offset))
+            current_parts = [sent]
             current_offset = sent_pos
+            current_len = len(sent)
         else:
-            if not current:
+            if not current_parts:
                 current_offset = sent_pos
-            current += " " + sent if current else sent
+            current_parts.append(sent)
+            current_len += len(sent) + 1  # +1 for joining space
+
         pos = sent_pos + len(sent)
 
-    if current:
-        chunks.append((current.strip(), current_offset))
+    if current_parts:
+        chunk_text = " ".join(current_parts)
+        chunks.append((chunk_text, current_offset))
 
     return chunks
 
@@ -152,20 +165,14 @@ def extract_coreference_chains(
     """
     Extract coreference chains from a fastcoref-processed spaCy doc.
 
-    fastcoref stores clusters as character offset tuples on doc._.coref_clusters:
-        [[(char_start, char_end), ...], ...]
-
     Returns:
         Dict mapping entity_id -> [
             (sent_idx, token_idx, surface_text, abs_char_start, abs_char_end),
             ...
         ]
 
-    IMPORTANT: surface_text and abs char offsets are taken directly from
-    fastcoref's raw char_start/char_end — we do NOT use char_span offsets
-    for the surface or positions (char_span with alignment_mode='expand' can
-    widen the span beyond the actual surface). char_span is used only to
-    determine sent_idx and token_idx for legacy compatibility.
+    surface_text and abs char offsets use raw fastcoref char_start/char_end.
+    char_span(expand) is used ONLY for sent_idx/token_idx bookkeeping.
     """
     chains: Dict[int, List[Tuple[int, int, str, int, int]]] = {}
 
@@ -177,10 +184,10 @@ def extract_coreference_chains(
         mentions: List[Tuple[int, int, str, int, int]] = []
 
         for char_start, char_end in cluster:
-            # Raw surface from fastcoref offsets — exact, no expansion
+            # Raw surface — exact, no token-boundary expansion
             surface = doc.text[char_start:char_end]
 
-            # Use char_span only for sent/token indexing (not for offsets)
+            # char_span only for sent/token index (not for position)
             span = doc.char_span(char_start, char_end, alignment_mode="expand")
             if span is not None:
                 sents = list(doc.sents)
@@ -193,7 +200,6 @@ def extract_coreference_chains(
                 sent_idx = 0
                 token_idx = 0
 
-            # Absolute offsets = chunk offset + fastcoref chunk-relative offset
             abs_start = chunk_char_offset + char_start
             abs_end = chunk_char_offset + char_end
 
@@ -212,8 +218,7 @@ def extract_discourse_relations(doc: Any) -> List[Tuple[int, int, str, str]]:
     """
     Extract discourse connectives and their relation types.
 
-    Returns:
-        List of (sent_idx, token_idx, connective_text, relation_type)
+    Returns list of (sent_idx, token_idx, connective_text, relation_type).
     """
     relations: List[Tuple[int, int, str, str]] = []
 
