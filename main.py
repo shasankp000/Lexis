@@ -222,18 +222,17 @@ def _flatten(nested: List[List[Any]]) -> List[Any]:
     return [item for sub in nested for item in sub]
 
 
-_ATTACH_LEFT = set(".,;:!?)'\"-—%-/")
-# Only '(' stays in _ATTACH_RIGHT. '"' and "'" were removed: in a flat decoded
-# token stream we cannot distinguish opening from closing quotes, so having
-# them here caused every word after a closing quote to be joined without a
-# space (e.g. '."while' instead of '. "while'). The '(' case is reinforced
-# by the result.replace('( ', '(') post-pass below.
+# '"' intentionally absent: double-quote is ambiguous (opening vs closing) in
+# a flat token stream. Keeping it in _ATTACH_LEFT caused opening quotes to glue
+# to the preceding token (e.g. '."while' instead of '. "while'). Closing-quote
+# before punctuation is still handled because punctuation tokens are in
+# _ATTACH_LEFT and attach themselves leftward.
+_ATTACH_LEFT = set(".,;:!?)'-—%-/")
+# Only '(' stays in _ATTACH_RIGHT. '"' and "'" removed (see earlier commit).
 _ATTACH_RIGHT = set("($#/")
 
-# Matches a straight double-quote (or backtick) immediately followed by a
-# letter -- this is a quote-word boundary that needs a space inserted.
-# Single-quote / apostrophe is intentionally excluded: possessives like
-# "ahab's" are handled by the first_char=="'" branch and must not get a space.
+# Inserts a space between a straight double-quote and a directly following
+# letter, covering the closing-quote-before-word case (e.g. '"word' -> '" word').
 _QUOTE_WORD_RE = re.compile(r'(["\`])([A-Za-z])')
 
 
@@ -270,9 +269,6 @@ def _join_words(words: list[str]) -> str:
     result = result.replace("( ", "(").replace(" )", ")")
     result = result.replace("[ ", "[").replace(" ]", "]")
     result = result.replace(" — ", "—")
-    # Insert a space between a closing quote and a directly following letter.
-    # e.g. '."while' -> '." while', '"hello' stays '"hello' when it already
-    # has a space before the quote.
     result = _QUOTE_WORD_RE.sub(r"\1 \2", result)
     return result.strip()
 
