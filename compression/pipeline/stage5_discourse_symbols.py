@@ -26,14 +26,43 @@ PRONOUNS: frozenset = frozenset({
     "He", "She", "It", "They", "Him", "Her", "His", "Their", "Them", "We", "I",
 })
 
+# Characters that can legitimately follow a surface match (possessives, punctuation)
+# A match is "exact" only if it is NOT immediately followed by a word character
+# that would make it a substring of a longer token.
+_WORD_CHAR = re.compile(r"\w")
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 def _find_all_occurrences(text: str, surface: str) -> List[Tuple[int, int]]:
-    """Find every non-overlapping occurrence of `surface` in `text`."""
-    return [(m.start(), m.end()) for m in re.finditer(re.escape(surface), text)]
+    """
+    Find every occurrence of `surface` in `text` that is NOT a prefix of a
+    longer word/token.
+
+    E.g. surface="The Whale" will NOT match inside "The Whale's" because
+    the character immediately after the match is "'" followed by "s" —
+    we check whether the char right after is an apostrophe+word char sequence
+    that would make this a possessive extension.
+
+    Specifically we reject a match at (start, end) when text[end] is one of:
+      - a word character (\w)  — match is a strict prefix of a longer token
+      - an apostrophe followed immediately by a word character — possessive
+    """
+    results = []
+    pattern = re.escape(surface)
+    for m in re.finditer(pattern, text):
+        end = m.end()
+        # Reject if immediately followed by a word char (substring of longer token)
+        if end < len(text) and _WORD_CHAR.match(text[end]):
+            continue
+        # Reject if immediately followed by possessive ('s, ’s, ‘s)
+        if end < len(text) and text[end] in ("'", "\u2019", "\u2018"):
+            if end + 1 < len(text) and _WORD_CHAR.match(text[end + 1]):
+                continue
+        results.append((m.start(), m.end()))
+    return results
 
 
 def _get_char_offsets(
@@ -52,7 +81,6 @@ def _get_char_offsets(
         resolved = [(m[3], m[4], m[2]) for m in mentions]
         return sorted(resolved, key=lambda x: x[0])
 
-    # Build pool: surface -> all occurrences in document order
     surface_pool: Dict[str, List[Tuple[int, int]]] = {}
     for m in mentions:
         surface = m[2]
@@ -74,20 +102,15 @@ def _get_char_offsets(
     return sorted(resolved, key=lambda x: x[0])
 
 
-def _pick_anchor(
-    resolved: List[Tuple[int, int, str]]
-) -> int:
+def _pick_anchor(resolved: List[Tuple[int, int, str]]) -> int:
     """
-    Return the index of the best anchor mention within `resolved`.
-
-    Preference order:
-      1. First non-pronoun mention in document order (named entity / noun phrase)
-      2. Fall back to index 0 if all mentions are pronouns
+    Return index of best anchor in document-ordered resolved mentions.
+    Prefers first non-pronoun (named entity / noun phrase) over pronouns.
     """
     for i, (_, _, surface) in enumerate(resolved):
         if surface.strip() not in PRONOUNS:
             return i
-    return 0  # all pronouns — use earliest
+    return 0
 
 
 def _resolve_relation_offsets(
@@ -148,9 +171,9 @@ def encode_symbols(
     Replace repeated entity mentions (and optionally discourse connectives)
     with compact symbols. Lossless: decode_symbols(result, table) == text.
 
-    Anchor selection rules:
-      - Resolve all mentions to document order (ascending char offset).
-      - Choose the first NON-PRONOUN mention as anchor (named entity preferred).
+    Anchor selection:
+      - Resolve all mentions to document order.
+      - Choose first NON-PRONOUN mention as anchor.
       - Replace all other mentions with §E{entity_id}.
       - Apply replacements right-to-left to preserve earlier offsets.
     """
@@ -160,17 +183,14 @@ def encode_symbols(
     for eid, mentions in stage4_result.get("coreference_chains", {}).items():
         if not mentions:
             continue
-
         resolved = _get_char_offsets(text, mentions)
         if not resolved:
             continue
 
         symbol = f"§E{eid}"
         anchor_idx = _pick_anchor(resolved)
-        _, _, anchor_surface = resolved[anchor_idx]
-        symbol_table[symbol] = anchor_surface
+        symbol_table[symbol] = resolved[anchor_idx][2]
 
-        # Replace every mention that is NOT the anchor
         for i, (char_start, char_end, _) in enumerate(resolved):
             if i != anchor_idx:
                 ops.append((char_start, char_end, symbol))
@@ -184,7 +204,6 @@ def encode_symbols(
             symbol_table[symbol] = connective
             ops.append((char_start, char_end, symbol))
 
-    # Apply right-to-left
     ops.sort(key=lambda x: -x[0])
     compressed = text
     for char_start, char_end, sym in ops:
