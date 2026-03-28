@@ -19,16 +19,13 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 SymbolTable = Dict[str, str]
-MentionTuple = Tuple  # 3-tuple or 5-tuple from Stage 4
+MentionTuple = Tuple  # 3-tuple (sent_idx, token_idx, surface) or 5-tuple with char spans
 
 PRONOUNS: frozenset = frozenset({
     "he", "she", "it", "they", "him", "her", "his", "their", "them", "we", "i",
     "He", "She", "It", "They", "Him", "Her", "His", "Their", "Them", "We", "I",
 })
 
-# Characters that can legitimately follow a surface match (possessives, punctuation)
-# A match is "exact" only if it is NOT immediately followed by a word character
-# that would make it a substring of a longer token.
 _WORD_CHAR = re.compile(r"\w")
 
 
@@ -38,31 +35,36 @@ _WORD_CHAR = re.compile(r"\w")
 
 def _find_all_occurrences(text: str, surface: str) -> List[Tuple[int, int]]:
     """
-    Find every occurrence of `surface` in `text` that is NOT a prefix of a
-    longer word/token.
-
-    E.g. surface="The Whale" will NOT match inside "The Whale's" because
-    the character immediately after the match is "'" followed by "s" —
-    we check whether the char right after is an apostrophe+word char sequence
-    that would make this a possessive extension.
-
-    Specifically we reject a match at (start, end) when text[end] is one of:
-      - a word character (\w)  — match is a strict prefix of a longer token
-      - an apostrophe followed immediately by a word character — possessive
+    Find every occurrence of `surface` in `text` that is NOT a strict prefix
+    of a longer token (word char immediately after) or a possessive stem
+    (apostrophe + word char immediately after).
     """
     results = []
-    pattern = re.escape(surface)
-    for m in re.finditer(pattern, text):
+    for m in re.finditer(re.escape(surface), text):
         end = m.end()
-        # Reject if immediately followed by a word char (substring of longer token)
         if end < len(text) and _WORD_CHAR.match(text[end]):
             continue
-        # Reject if immediately followed by possessive ('s, ’s, ‘s)
         if end < len(text) and text[end] in ("'", "\u2019", "\u2018"):
             if end + 1 < len(text) and _WORD_CHAR.match(text[end + 1]):
                 continue
         results.append((m.start(), m.end()))
     return results
+
+
+def _sentence_char_boundaries(text: str) -> List[Tuple[int, int]]:
+    """
+    Split text into sentences (same regex as Stage 4's _chunk_at_sentences)
+    and return (char_start, char_end) for each sentence.
+    """
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    boundaries: List[Tuple[int, int]] = []
+    cursor = 0
+    for sent in sentences:
+        start = text.index(sent, cursor)
+        end = start + len(sent)
+        boundaries.append((start, end))
+        cursor = end
+    return boundaries
 
 
 def _get_char_offsets(
@@ -73,40 +75,69 @@ def _get_char_offsets(
     Resolve mention tuples to (char_start, char_end, surface), sorted by char_start.
 
     If Stage 4 provides 5-tuples with char spans, use them directly.
-    Otherwise build an occurrence pool per surface and consume left-to-right.
+
+    Otherwise: for each mention (sent_idx, token_idx, surface), find the occurrence
+    of `surface` that falls within the sentence indicated by sent_idx. This prevents
+    grabbing the wrong occurrence of a common pronoun (e.g. "Him") that appears in
+    multiple sentences.
     """
     has_offsets = mentions and len(mentions[0]) >= 5
-
     if has_offsets:
         resolved = [(m[3], m[4], m[2]) for m in mentions]
         return sorted(resolved, key=lambda x: x[0])
 
+    # Build sentence boundaries once
+    sent_bounds = _sentence_char_boundaries(text)
+
+    # Pre-build occurrence list per surface
     surface_pool: Dict[str, List[Tuple[int, int]]] = {}
     for m in mentions:
         surface = m[2]
         if surface not in surface_pool:
             surface_pool[surface] = _find_all_occurrences(text, surface)
 
-    surface_cursors: Dict[str, int] = {s: 0 for s in surface_pool}
     resolved: List[Tuple[int, int, str]] = []
+    used_spans: set = set()
 
     for m in mentions:
-        surface = m[2]
-        pool = surface_pool[surface]
-        idx = surface_cursors[surface]
-        if idx < len(pool):
-            char_start, char_end = pool[idx]
-            resolved.append((char_start, char_end, surface))
-            surface_cursors[surface] = idx + 1
+        sent_idx, token_idx, surface = m[0], m[1], m[2]
+        occurrences = surface_pool[surface]
+
+        # Determine the char range for this sentence
+        if sent_idx < len(sent_bounds):
+            sent_start, sent_end = sent_bounds[sent_idx]
+        else:
+            sent_start, sent_end = 0, len(text)
+
+        # Find the first unused occurrence that falls within the sentence window.
+        # If none found in the sentence, fall back to the nearest unused occurrence
+        # after sent_start (handles slight sentence-split mismatches).
+        best: Optional[Tuple[int, int]] = None
+        for occ_start, occ_end in occurrences:
+            if (occ_start, occ_end) in used_spans:
+                continue
+            if sent_start <= occ_start < sent_end:
+                best = (occ_start, occ_end)
+                break
+
+        if best is None:
+            # Fallback: nearest unused occurrence at or after sent_start
+            for occ_start, occ_end in occurrences:
+                if (occ_start, occ_end) in used_spans and occ_start >= sent_start:
+                    continue
+                if occ_start >= sent_start:
+                    best = (occ_start, occ_end)
+                    break
+
+        if best is not None:
+            used_spans.add(best)
+            resolved.append((best[0], best[1], surface))
 
     return sorted(resolved, key=lambda x: x[0])
 
 
 def _pick_anchor(resolved: List[Tuple[int, int, str]]) -> int:
-    """
-    Return index of best anchor in document-ordered resolved mentions.
-    Prefers first non-pronoun (named entity / noun phrase) over pronouns.
-    """
+    """Return index of first non-pronoun mention; fall back to 0."""
     for i, (_, _, surface) in enumerate(resolved):
         if surface.strip() not in PRONOUNS:
             return i
@@ -119,30 +150,40 @@ def _resolve_relation_offsets(
 ) -> List[Tuple[int, int, str, str]]:
     """Resolve discourse relation tuples to absolute char offsets."""
     has_offsets = relations and len(relations[0]) >= 6
-
     if has_offsets:
         return sorted(
             [(r[4], r[5], r[2], r[3]) for r in relations],
             key=lambda x: x[0],
         )
 
+    sent_bounds = _sentence_char_boundaries(text)
     connective_pool: Dict[str, List[Tuple[int, int]]] = {}
     for r in relations:
-        connective = r[2]
-        if connective not in connective_pool:
-            connective_pool[connective] = _find_all_occurrences(text, connective)
+        c = r[2]
+        if c not in connective_pool:
+            connective_pool[c] = _find_all_occurrences(text, c)
 
-    connective_cursors: Dict[str, int] = {c: 0 for c in connective_pool}
+    used_spans: set = set()
     resolved: List[Tuple[int, int, str, str]] = []
-
     for r in relations:
-        connective, rel_type = r[2], r[3]
+        sent_idx, connective, rel_type = r[0], r[2], r[3]
         pool = connective_pool[connective]
-        idx = connective_cursors[connective]
-        if idx < len(pool):
-            char_start, char_end = pool[idx]
-            resolved.append((char_start, char_end, connective, rel_type))
-            connective_cursors[connective] = idx + 1
+        sent_start, sent_end = (
+            sent_bounds[sent_idx] if sent_idx < len(sent_bounds) else (0, len(text))
+        )
+        best: Optional[Tuple[int, int]] = None
+        for occ_start, occ_end in pool:
+            if (occ_start, occ_end) not in used_spans and sent_start <= occ_start < sent_end:
+                best = (occ_start, occ_end)
+                break
+        if best is None:
+            for occ_start, occ_end in pool:
+                if (occ_start, occ_end) not in used_spans and occ_start >= sent_start:
+                    best = (occ_start, occ_end)
+                    break
+        if best is not None:
+            used_spans.add(best)
+            resolved.append((best[0], best[1], connective, rel_type))
 
     return sorted(resolved, key=lambda x: x[0])
 
@@ -170,12 +211,6 @@ def encode_symbols(
     """
     Replace repeated entity mentions (and optionally discourse connectives)
     with compact symbols. Lossless: decode_symbols(result, table) == text.
-
-    Anchor selection:
-      - Resolve all mentions to document order.
-      - Choose first NON-PRONOUN mention as anchor.
-      - Replace all other mentions with §E{entity_id}.
-      - Apply replacements right-to-left to preserve earlier offsets.
     """
     symbol_table: SymbolTable = {}
     ops: List[Tuple[int, int, str]] = []
@@ -215,7 +250,7 @@ def encode_symbols(
 def decode_symbols(compressed: str, symbol_table: SymbolTable) -> str:
     """
     Reconstruct original text. Symbols replaced longest-first to prevent
-    partial matches (e.g. §E10 matched as §E1).
+    partial matches (e.g. §E10 matched before §E1).
     """
     result = compressed
     for symbol, surface in sorted(symbol_table.items(), key=lambda x: -len(x[0])):
