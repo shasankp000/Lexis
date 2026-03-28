@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, cast
@@ -229,6 +230,12 @@ _ATTACH_LEFT = set(".,;:!?)'\"-—%-/")
 # by the result.replace('( ', '(') post-pass below.
 _ATTACH_RIGHT = set("($#/")
 
+# Matches a straight double-quote (or backtick) immediately followed by a
+# letter -- this is a quote-word boundary that needs a space inserted.
+# Single-quote / apostrophe is intentionally excluded: possessives like
+# "ahab's" are handled by the first_char=="'" branch and must not get a space.
+_QUOTE_WORD_RE = re.compile(r'(["\`])([A-Za-z])')
+
 
 def _join_words(words: list[str]) -> str:
     """Join tokens intelligently, suppressing spaces around punctuation."""
@@ -263,6 +270,10 @@ def _join_words(words: list[str]) -> str:
     result = result.replace("( ", "(").replace(" )", ")")
     result = result.replace("[ ", "[").replace(" ]", "]")
     result = result.replace(" — ", "—")
+    # Insert a space between a closing quote and a directly following letter.
+    # e.g. '."while' -> '." while', '"hello' stays '"hello' when it already
+    # has a space before the quote.
+    result = _QUOTE_WORD_RE.sub(r"\1 \2", result)
     return result.strip()
 
 
