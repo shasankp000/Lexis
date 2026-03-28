@@ -114,46 +114,50 @@ def is_compression_worthy(mentions: List[Tuple]) -> bool:
 
 def _chunk_at_sentences(text: str, max_chars: int) -> List[Tuple[str, int]]:
     """
-    Split text into chunks of ~max_chars, breaking at sentence boundaries.
+    Split `text` into chunks of ~max_chars, breaking only at sentence boundaries.
 
-    Returns list of (chunk_text, chunk_char_offset) where chunk_char_offset
-    is the absolute position of the FIRST CHARACTER of chunk_text in `text`.
+    Returns list of (chunk_text, chunk_char_offset) where:
+      - chunk_text   is a verbatim slice of `text` (no synthetic spaces added)
+      - chunk_char_offset is the absolute index of chunk_text[0] in `text`
 
-    IMPORTANT: chunks are NOT stripped — we preserve exact text so that
-    fastcoref char offsets (which are relative to the chunk string) map
-    correctly to absolute document positions via chunk_char_offset.
+    By slicing the original text directly we guarantee that
+    fastcoref's chunk-relative char offsets + chunk_char_offset == absolute
+    document offsets with no off-by-one from join separators.
     """
     import re
 
-    sentences = re.split(r"(?<=[.!?])\s+", text)
+    # Find the start position of every sentence in the original text
+    sentence_starts: List[int] = []
+    pos = 0
+    for sent in re.split(r"(?<=[.!?])\s+", text):
+        idx = text.index(sent, pos)
+        sentence_starts.append(idx)
+        pos = idx + len(sent)
+
     chunks: List[Tuple[str, int]] = []
-    current_parts: List[str] = []
-    current_offset: int = 0
-    current_len: int = 0
-    pos: int = 0
+    chunk_start_idx = 0       # index into sentence_starts for current chunk
+    chunk_char_start = sentence_starts[0] if sentence_starts else 0
 
-    for sent in sentences:
-        sent_pos = text.index(sent, pos)
-
-        if current_len + len(sent) > max_chars and current_parts:
-            # Flush current chunk — join with single space to match split behaviour
-            chunk_text = " ".join(current_parts)
-            # chunk_char_offset is where the first sentence of this chunk starts
-            chunks.append((chunk_text, current_offset))
-            current_parts = [sent]
-            current_offset = sent_pos
-            current_len = len(sent)
+    for i, sent_start in enumerate(sentence_starts):
+        # Determine end of this sentence in the original text
+        if i + 1 < len(sentence_starts):
+            next_sent_start = sentence_starts[i + 1]
         else:
-            if not current_parts:
-                current_offset = sent_pos
-            current_parts.append(sent)
-            current_len += len(sent) + 1  # +1 for joining space
+            next_sent_start = len(text)
 
-        pos = sent_pos + len(sent)
+        chunk_so_far_len = next_sent_start - chunk_char_start
 
-    if current_parts:
-        chunk_text = " ".join(current_parts)
-        chunks.append((chunk_text, current_offset))
+        # Flush when adding this sentence would exceed max_chars
+        # (but always include at least one sentence per chunk)
+        if chunk_so_far_len > max_chars and i > chunk_start_idx:
+            chunk_end = sent_start  # end of previous sentence
+            chunks.append((text[chunk_char_start:chunk_end], chunk_char_start))
+            chunk_start_idx = i
+            chunk_char_start = sent_start
+
+    # Final chunk
+    if chunk_start_idx < len(sentence_starts):
+        chunks.append((text[chunk_char_start:], chunk_char_start))
 
     return chunks
 
