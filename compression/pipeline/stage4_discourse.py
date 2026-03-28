@@ -90,29 +90,21 @@ def is_compression_worthy(mentions: List[Tuple]) -> bool:
     """
     Decide whether a coreference chain is worth encoding.
 
-    A chain is worthy if:
-      - It has 2+ mentions (required for any substitution)
-      - It is not dominated by boilerplate terms
-      - Average mention length is reasonable (< 25 chars)
-      - It has at least 2 distinct surface forms OR at least 2 identical
-        named-entity repeats (pure-named chains like [Ahab, Ahab] are valid)
-
-    NOTE: The old requirement that a chain MUST contain a pronoun has been
-    removed. Pure named-entity repeat chains are compression-worthy too.
+    A chain is worthy if it has 2+ mentions, is not boilerplate-dominated,
+    and has a reasonable average mention length. Pure named-entity repeat
+    chains (e.g. [Ahab, Ahab]) are valid — no pronoun requirement.
     """
     surfaces = [m[2].lower().strip() for m in mentions]
 
     if len(mentions) < 2:
         return False
 
-    # Skip boilerplate-dominated chains
     boilerplate_count = sum(
         any(term in s for term in BOILERPLATE_TERMS) for s in surfaces
     )
     if boilerplate_count / len(surfaces) > 0.5:
         return False
 
-    # Skip very long average mention surfaces
     avg_len = sum(len(s) for s in surfaces) / len(surfaces)
     if avg_len > 25:
         return False
@@ -125,7 +117,7 @@ def _chunk_at_sentences(text: str, max_chars: int) -> List[Tuple[str, int]]:
     Split text into chunks of ~max_chars, breaking at sentence boundaries.
 
     Returns list of (chunk_text, chunk_char_offset) so callers can map
-    chunk-relative char positions back to absolute document positions.
+    chunk-relative char positions to absolute document positions.
     """
     import re
 
@@ -136,7 +128,6 @@ def _chunk_at_sentences(text: str, max_chars: int) -> List[Tuple[str, int]]:
     pos = 0
 
     for sent in sentences:
-        # Find where this sentence starts in the original text
         sent_pos = text.index(sent, pos)
         if len(current) + len(sent) > max_chars and current:
             chunks.append((current.strip(), current_offset))
@@ -170,8 +161,11 @@ def extract_coreference_chains(
             ...
         ]
 
-    char offsets are ABSOLUTE (relative to the full document), computed by
-    adding chunk_char_offset to the chunk-relative fastcoref offsets.
+    IMPORTANT: surface_text and abs char offsets are taken directly from
+    fastcoref's raw char_start/char_end — we do NOT use char_span offsets
+    for the surface or positions (char_span with alignment_mode='expand' can
+    widen the span beyond the actual surface). char_span is used only to
+    determine sent_idx and token_idx for legacy compatibility.
     """
     chains: Dict[int, List[Tuple[int, int, str, int, int]]] = {}
 
@@ -183,18 +177,23 @@ def extract_coreference_chains(
         mentions: List[Tuple[int, int, str, int, int]] = []
 
         for char_start, char_end in cluster:
-            span = doc.char_span(char_start, char_end, alignment_mode="expand")
-            if span is None:
-                continue
-
-            sents = list(doc.sents)
-            sent_idx = next(
-                (i for i, s in enumerate(sents) if s.start <= span.start < s.end), 0
-            )
-            token_idx = span.start - sents[sent_idx].start
+            # Raw surface from fastcoref offsets — exact, no expansion
             surface = doc.text[char_start:char_end]
 
-            # Absolute char offsets in the full document
+            # Use char_span only for sent/token indexing (not for offsets)
+            span = doc.char_span(char_start, char_end, alignment_mode="expand")
+            if span is not None:
+                sents = list(doc.sents)
+                sent_idx = next(
+                    (i for i, s in enumerate(sents) if s.start <= span.start < s.end),
+                    0,
+                )
+                token_idx = span.start - sents[sent_idx].start
+            else:
+                sent_idx = 0
+                token_idx = 0
+
+            # Absolute offsets = chunk offset + fastcoref chunk-relative offset
             abs_start = chunk_char_offset + char_start
             abs_end = chunk_char_offset + char_end
 
@@ -222,14 +221,12 @@ def extract_discourse_relations(doc: Any) -> List[Tuple[int, int, str, str]]:
         tokens = [t for t in sent]
         lowered = [t.text.lower() for t in tokens]
 
-        # Single-token connectives
         for token_idx, token in enumerate(tokens):
             text_lower = token.text.lower()
             if text_lower in DISCOURSE_CONNECTIVES:
                 rel_type = DISCOURSE_CONNECTIVES[text_lower]
                 relations.append((sent_idx, token_idx, token.text, rel_type))
 
-        # Multiword connectives
         n = len(tokens)
         for token_idx in range(n):
             for phrase in _MULTIWORD_CONNECTIVES:
@@ -262,7 +259,7 @@ class DiscourseAnalyser:
         if use_spacy:
             try:
                 import spacy
-                from fastcoref import spacy_component  # noqa: F401 (registers factory)
+                from fastcoref import spacy_component  # noqa: F401
 
                 model_to_load = model_name or "en_core_web_lg"
                 self.nlp = spacy.load(model_to_load)
@@ -282,7 +279,7 @@ class DiscourseAnalyser:
 
     def analyse_document(self, text: str) -> Dict:
         """Chunk long texts to stay within model token limits."""
-        MAX_CHARS = 3000  # ~750 tokens, safety ceiling for model context windows
+        MAX_CHARS = 3000
 
         if not self.nlp:
             return {"coreference_chains": {}, "discourse_relations": []}
@@ -310,11 +307,7 @@ class DiscourseAnalyser:
         return {"coreference_chains": all_chains, "discourse_relations": all_relations}
 
     def analyse_sentence(self, text: str) -> Dict:
-        """
-        Analyse a single sentence.
-
-        Note: coreference across sentences won't be detected in single-sentence mode.
-        """
+        """Analyse a single sentence (no cross-sentence coreference)."""
         if not self.nlp:
             return {"coreference_chains": {}, "discourse_relations": []}
 
