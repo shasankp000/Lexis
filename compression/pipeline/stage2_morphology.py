@@ -188,9 +188,6 @@ class MorphologicalAnalyser:
         # Non-alpha tokens (digits, URLs, punctuation, mixed symbols) can never
         # be inflected meaningfully. Return them verbatim as BASE so that
         # apply_morph is a no-op and round-trip is guaranteed.
-        # Example: spaCy assigns Number=Plur to bare cardinals like '2701',
-        # which would otherwise fall through to the PLURAL branch and produce
-        # '2701s' via lemminflect.
         if not any(ch.isalpha() for ch in lower_text):
             return (lower_text, BASE)
 
@@ -202,6 +199,15 @@ class MorphologicalAnalyser:
 
         if lower_text in _IRREGULAR_SURFACE_TO_ROOT:
             return (_IRREGULAR_SURFACE_TO_ROOT[lower_text], IRREGULAR)
+
+        # If the surface form is identical to the lemma, no inflection code can
+        # round-trip correctly — apply_morph(lemma, X) for any X != BASE would
+        # produce a different surface. This also catches URLs and mixed
+        # alphanumeric tokens (e.g. 'www.gutenberg.org/ebooks/2701') that
+        # contain alpha chars but are lemmatised to themselves by spaCy, yet
+        # may still carry Number=Plur or other morphology features.
+        if lower_text == lemma:
+            return (lower_text, BASE)
 
         if lower_text.startswith("un") and lemma == lower_text[2:]:
             return (lemma, NEGATION)
