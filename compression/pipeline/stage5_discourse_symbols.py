@@ -6,6 +6,12 @@ Takes Stage 4 output (coreference_chains + discourse_relations) and produces:
   - Discourse connectives aligned to detected relations are replaced with §R{n} symbols
 
 Round-trip guarantee: decode_symbols(encode_symbols(text, stage4)[0], stage4) == text
+
+NOTE: When Stage 4 emits 3-tuples (sent_idx, token_idx, surface), pronoun substitution
+is fully disabled. Any chain containing a pronoun mention is skipped entirely because
+sent_idx is chunk-relative and cannot be safely mapped to global char positions.
+Once Stage 4 is updated to emit 5-tuples with absolute char spans, pronoun
+substitution re-enables automatically via the has_offsets path.
 """
 
 from __future__ import annotations
@@ -19,16 +25,13 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 SymbolTable = Dict[str, str]
-MentionTuple = Tuple  # 3-tuple or 5-tuple from Stage 4
+MentionTuple = Tuple  # 3-tuple (sent_idx, token_idx, surface) or 5-tuple with char spans
 
 PRONOUNS: frozenset = frozenset({
     "he", "she", "it", "they", "him", "her", "his", "their", "them", "we", "i",
     "He", "She", "It", "They", "Him", "Her", "His", "Their", "Them", "We", "I",
 })
 
-# Characters that can legitimately follow a surface match (possessives, punctuation)
-# A match is "exact" only if it is NOT immediately followed by a word character
-# that would make it a substring of a longer token.
 _WORD_CHAR = re.compile(r"\w")
 
 
@@ -38,31 +41,24 @@ _WORD_CHAR = re.compile(r"\w")
 
 def _find_all_occurrences(text: str, surface: str) -> List[Tuple[int, int]]:
     """
-    Find every occurrence of `surface` in `text` that is NOT a prefix of a
-    longer word/token.
-
-    E.g. surface="The Whale" will NOT match inside "The Whale's" because
-    the character immediately after the match is "'" followed by "s" —
-    we check whether the char right after is an apostrophe+word char sequence
-    that would make this a possessive extension.
-
-    Specifically we reject a match at (start, end) when text[end] is one of:
-      - a word character (\w)  — match is a strict prefix of a longer token
-      - an apostrophe followed immediately by a word character — possessive
+    Find every occurrence of `surface` in `text` that is NOT a strict prefix
+    of a longer token or a possessive stem (e.g. The Whale inside The Whale's).
     """
     results = []
-    pattern = re.escape(surface)
-    for m in re.finditer(pattern, text):
+    for m in re.finditer(re.escape(surface), text):
         end = m.end()
-        # Reject if immediately followed by a word char (substring of longer token)
         if end < len(text) and _WORD_CHAR.match(text[end]):
             continue
-        # Reject if immediately followed by possessive ('s, ’s, ‘s)
         if end < len(text) and text[end] in ("'", "\u2019", "\u2018"):
             if end + 1 < len(text) and _WORD_CHAR.match(text[end + 1]):
                 continue
         results.append((m.start(), m.end()))
     return results
+
+
+def _chain_has_pronoun(mentions: List[MentionTuple]) -> bool:
+    """Return True if any mention surface in the chain is a pronoun."""
+    return any(m[2].strip() in PRONOUNS for m in mentions)
 
 
 def _get_char_offsets(
@@ -72,8 +68,9 @@ def _get_char_offsets(
     """
     Resolve mention tuples to (char_start, char_end, surface), sorted by char_start.
 
-    If Stage 4 provides 5-tuples with char spans, use them directly.
+    If Stage 4 provides 5-tuples with absolute char spans, use them directly.
     Otherwise build an occurrence pool per surface and consume left-to-right.
+    Pronouns should already be filtered out before calling this (see encode_symbols).
     """
     has_offsets = mentions and len(mentions[0]) >= 5
 
@@ -103,10 +100,7 @@ def _get_char_offsets(
 
 
 def _pick_anchor(resolved: List[Tuple[int, int, str]]) -> int:
-    """
-    Return index of best anchor in document-ordered resolved mentions.
-    Prefers first non-pronoun (named entity / noun phrase) over pronouns.
-    """
+    """Return index of first non-pronoun mention; fall back to 0."""
     for i, (_, _, surface) in enumerate(resolved):
         if surface.strip() not in PRONOUNS:
             return i
@@ -119,7 +113,6 @@ def _resolve_relation_offsets(
 ) -> List[Tuple[int, int, str, str]]:
     """Resolve discourse relation tuples to absolute char offsets."""
     has_offsets = relations and len(relations[0]) >= 6
-
     if has_offsets:
         return sorted(
             [(r[4], r[5], r[2], r[3]) for r in relations],
@@ -128,9 +121,9 @@ def _resolve_relation_offsets(
 
     connective_pool: Dict[str, List[Tuple[int, int]]] = {}
     for r in relations:
-        connective = r[2]
-        if connective not in connective_pool:
-            connective_pool[connective] = _find_all_occurrences(text, connective)
+        c = r[2]
+        if c not in connective_pool:
+            connective_pool[c] = _find_all_occurrences(text, c)
 
     connective_cursors: Dict[str, int] = {c: 0 for c in connective_pool}
     resolved: List[Tuple[int, int, str, str]] = []
@@ -168,23 +161,37 @@ def encode_symbols(
     encode_relations: bool = False,
 ) -> Tuple[str, SymbolTable]:
     """
-    Replace repeated entity mentions (and optionally discourse connectives)
+    Replace repeated named-entity mentions (and optionally discourse connectives)
     with compact symbols. Lossless: decode_symbols(result, table) == text.
 
-    Anchor selection:
-      - Resolve all mentions to document order.
-      - Choose first NON-PRONOUN mention as anchor.
-      - Replace all other mentions with §E{entity_id}.
-      - Apply replacements right-to-left to preserve earlier offsets.
+    In 3-tuple mode (Stage 4 without absolute offsets): any chain that contains
+    even one pronoun mention is skipped entirely. This is because sent_idx values
+    are chunk-relative and we cannot safely locate pronouns globally.
+
+    In 5-tuple mode (Stage 4 with absolute char spans): pronoun substitution is
+    fully enabled since spans are unambiguous.
     """
     symbol_table: SymbolTable = {}
     ops: List[Tuple[int, int, str]] = []
 
-    for eid, mentions in stage4_result.get("coreference_chains", {}).items():
+    chains = stage4_result.get("coreference_chains", {})
+
+    # Detect whether Stage 4 provides absolute offsets on any chain
+    has_absolute_offsets = any(
+        mentions and len(mentions[0]) >= 5
+        for mentions in chains.values()
+    )
+
+    for eid, mentions in chains.items():
         if not mentions:
             continue
+
+        # In 3-tuple mode: skip any chain that contains a pronoun mention
+        if not has_absolute_offsets and _chain_has_pronoun(mentions):
+            continue
+
         resolved = _get_char_offsets(text, mentions)
-        if not resolved:
+        if len(resolved) < 2:
             continue
 
         symbol = f"§E{eid}"
@@ -215,7 +222,7 @@ def encode_symbols(
 def decode_symbols(compressed: str, symbol_table: SymbolTable) -> str:
     """
     Reconstruct original text. Symbols replaced longest-first to prevent
-    partial matches (e.g. §E10 matched as §E1).
+    partial matches (e.g. §E10 matched before §E1).
     """
     result = compressed
     for symbol, surface in sorted(symbol_table.items(), key=lambda x: -len(x[0])):
