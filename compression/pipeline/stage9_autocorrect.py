@@ -5,10 +5,11 @@ Zero external dependencies; pure regex over the joined string.
 
 Artifact classes targeted
 --------------------------
-1. Opening-quote gap      :  '"word'  (space after opening quote removed)
+1. Opening-quote gap      :  '" word'  ->  '"word'  (space after opening quote removed)
 2. Closing-quote gap      :  'word " ,'  ->  'word",'
+2c. Period+quote+word     :  'end."next'  ->  'end. "next'  (opening quote after sentence)
 3. Hyphenated compounds   :  'whale - fish'  ->  'whale-fish'
-4. Em-dash spacing        :  ' -- '  ->  '--'
+4. Em-dash / double-hyphen:  ' -- '  ->  '--'
 5. Bracket inner spacing  :  '( word )'  ->  '(word)'
 6. Apostrophe contractions:  "do n't"  ->  "don't"
 7. Collapsed whitespace   :  multiple spaces -> single space
@@ -39,6 +40,11 @@ _RULES: list[tuple[re.Pattern, str]] = [
     # 2b. Closing quote followed by space (end of quoted clause):
     #     'word " ' -> 'word" '
     (re.compile(r'(\w) " '), r'\1" '),
+    # 2c. Period+opening-quote glued to next word: 'end."next' -> 'end. "next'
+    #     _join_words glues '"' left after '.' (correct for closing quotes)
+    #     but when '"' is actually an opening quote for the next sentence
+    #     we need to re-insert the space between '"' and the following word.
+    (re.compile(r'(\.")(\w)'), r'\1 \2'),
 
     # 3. Hyphenated compounds: 'whale - fish' -> 'whale-fish'
     #    Guard: only between word characters, not list-item dashes.
