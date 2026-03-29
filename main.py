@@ -181,8 +181,7 @@ def _reconstruct_chars(
             char = inverse_map.get((cls, pos))
             if char is not None:
                 chars.append(char)
-            elif cls == 6:
-                chars.append("_")
+            # Unknown coord: skip silently (no fallback '_' insertion).
         idx += count
 
     if idx < len(class_stream):
@@ -193,8 +192,6 @@ def _reconstruct_chars(
             char = inverse_map.get((cls, pos))
             if char is not None:
                 chars.append(char)
-            elif cls == 6:
-                chars.append("_")
 
     return "".join(chars)
 
@@ -209,8 +206,6 @@ def _split_roots(char_stream: str) -> List[str]:
             if current:
                 roots.append("".join(current))
             current = []
-        elif char == "_":
-            continue
         else:
             current.append(char)
     if current:
@@ -230,7 +225,10 @@ _ATTACH_LEFT = set(".,;:!?)'-—%-/")
 # Chars whose right edge glues to the following token with no space.
 _ATTACH_RIGHT = set("($#/")
 # Previous-token endings that signal the next '"' is an opening quote.
-_OPEN_QUOTE_AFTER = set(".!?(— ")
+# NOTE: '.' intentionally excluded — '"' after '.' is a closing quote
+# (e.g. `true."`).  Opening quotes after sentence-end are preceded by
+# whitespace, which is still in this set via the space character.
+_OPEN_QUOTE_AFTER = set("!?(— ")
 
 
 def _join_words(words: list[str]) -> str:
