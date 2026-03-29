@@ -37,11 +37,14 @@ PHONETIC_CLASSES: dict[str, tuple[int, int]] = {
     "q": (5, 2),
     "w": (5, 3),
     "y": (5, 4),
-    # class 6 — pipeline-only stream markers (^ and $ are the only ones
-    # ever written into the char stream; _ is now class-5 punctuation)
+    # class 6 — pipeline stream markers and normalised punctuation.
+    # (6, 0) ^ — word start marker (written into char stream by encoder)
+    # (6, 1) $ — word end marker  (written into char stream by encoder)
+    # (6, 2)   — RESERVED (was '_' whitespace sentinel; now unused)
+    # (6, 3) . — period / full stop (real punctuation, must round-trip)
     "^": (6, 0),  # word start marker
     "$": (6, 1),  # word end marker
-    # (6, 2) was formerly '_' whitespace sentinel — now unused / reserved
+    ".": (6, 3),  # period — kept in class-6 to preserve original coordinates
 }
 
 _PUNCTUATION_CHARS = [
@@ -74,7 +77,7 @@ _PUNCTUATION_CHARS = [
     "~",
     "|",
     "`",
-    "_",   # moved here from class-6 sentinel so it round-trips as a real char
+    "_",   # moved from class-6 sentinel so it round-trips as a real character
 ]
 
 _DIGIT_CHARS = [
