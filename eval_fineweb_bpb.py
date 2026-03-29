@@ -2,15 +2,16 @@
 
 Usage
 -----
-    python eval_fineweb_bpb.py --samples 10 --chars 5000
+    python eval_fineweb_bpb.py --samples 50 --chars 5000 --out results.json
 
 Flags
 -----
---samples   Number of FineWeb documents to evaluate  (default: 10)
+--samples   Number of FineWeb documents to evaluate  (default: 50)
 --chars     Max characters to take from each doc     (default: 5000, 0=all)
 --split     FineWeb dataset split                    (default: train)
 --seed      Random seed for shuffling                (default: 42)
 --out       Optional path to write JSON results      (default: none)
+--verbose   Print per-sample progress                (default: False)
 
 What is measured
 ----------------
@@ -25,6 +26,12 @@ fairest apples-to-apples comparison against other arithmetic coders.
 
 A bpb of 8.0 means no compression.  English text typically compresses to
 ~1.5-2.5 bpb with a strong LM.  This pipeline targets ~3-5 bpb.
+
+Model initialisation
+--------------------
+SpaCy (en_core_web_lg) and the HuggingFace coreference model are loaded
+ONCE at startup and reused across all samples, avoiding the ~2-3s
+cold-start penalty per document.
 """
 
 from __future__ import annotations
@@ -39,22 +46,51 @@ import time
 from pathlib import Path
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# Silence spaCy / HuggingFace noise unless user wants verbose output
-# ---------------------------------------------------------------------------
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import logging
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("datasets").setLevel(logging.ERROR)
+logging.getLogger("torch").setLevel(logging.ERROR)
 
+
+# ---------------------------------------------------------------------------
+# One-time model initialisation
+# ---------------------------------------------------------------------------
+
+def _init_models(spacy_model: str = "en_core_web_lg"):
+    """
+    Load spaCy and the coreference model once.
+    Returns (nlp, discourse_analyser).
+    """
+    print("[Init] Loading spaCy model...")
+    import spacy
+    gpu_fn = getattr(spacy, "prefer_gpu", None) or getattr(spacy, "require_gpu", None)
+    if callable(gpu_fn):
+        gpu_fn()
+    nlp = spacy.load(spacy_model)
+    from compression.config import SPACY_MAX_LENGTH
+    nlp.max_length = SPACY_MAX_LENGTH
+    print(f"[Init] spaCy loaded: {spacy_model}")
+
+    print("[Init] Loading coreference model...")
+    from compression.pipeline.stage4_discourse import DiscourseAnalyser
+    analyser = DiscourseAnalyser(use_spacy=True, device="cpu")
+    print("[Init] Coreference model loaded.")
+
+    return nlp, analyser
+
+
+# ---------------------------------------------------------------------------
+# FineWeb loader
+# ---------------------------------------------------------------------------
 
 def _load_fineweb(n_samples: int, max_chars: int, split: str, seed: int) -> list[str]:
     """Stream n_samples documents from FineWeb, truncated to max_chars."""
     try:
         from datasets import load_dataset  # type: ignore
     except ImportError:
-        print("ERROR: 'datasets' package not installed.  Run: pip install datasets", file=sys.stderr)
+        print("ERROR: 'datasets' not installed. Run: pip install datasets", file=sys.stderr)
         sys.exit(1)
 
     print(f"[FineWeb] Streaming {n_samples} samples from split='{split}'...")
@@ -67,13 +103,12 @@ def _load_fineweb(n_samples: int, max_chars: int, split: str, seed: int) -> list
     )
 
     rng = random.Random(seed)
-    # Reservoir-sample to get a random subset without loading everything
     reservoir: list[str] = []
     for i, row in enumerate(ds):
         text: str = row.get("text", "")
         if max_chars > 0:
             text = text[:max_chars]
-        if len(text) < 100:   # skip very short docs
+        if len(text) < 100:
             continue
         if len(reservoir) < n_samples:
             reservoir.append(text)
@@ -81,7 +116,7 @@ def _load_fineweb(n_samples: int, max_chars: int, split: str, seed: int) -> list
             j = rng.randint(0, i)
             if j < n_samples:
                 reservoir[j] = text
-        if i >= n_samples * 20:  # look at 20x samples to get a good spread
+        if i >= n_samples * 20:
             break
 
     rng.shuffle(reservoir)
@@ -89,9 +124,35 @@ def _load_fineweb(n_samples: int, max_chars: int, split: str, seed: int) -> list
     return reservoir
 
 
-def _eval_one(text: str, idx: int) -> dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Per-sample evaluation
+# ---------------------------------------------------------------------------
+
+def _eval_one(
+    text: str,
+    idx: int,
+    nlp,
+    discourse_analyser,
+    verbose: bool = False,
+) -> dict[str, Any]:
     """Run the full pipeline on one document and return bpb stats."""
-    from main import compress_to_file
+    # Monkey-patch module-level singletons so pipeline reuses loaded models.
+    import main as main_module
+    import compression.pipeline.stage4_discourse as stage4_module
+    import compression.pipeline.stage2_morphology as stage2_module
+
+    # Patch _get_nlp to return the already-loaded nlp
+    _orig_get_nlp = main_module._get_nlp
+    main_module._get_nlp = lambda model=None: nlp
+
+    # Patch DiscourseAnalyser.__init__ to reuse the already-loaded analyser
+    _orig_run_discourse = main_module._run_discourse
+    def _fast_run_discourse(text_in: str, device: str = "cpu"):
+        from compression.pipeline.stage5_discourse_symbols import encode_symbols
+        stage4_result = discourse_analyser.analyse_document(text_in)
+        compressed, symbol_table = encode_symbols(text_in, stage4_result)
+        return compressed, symbol_table
+    main_module._run_discourse = _fast_run_discourse
 
     original_bytes = len(text.encode("utf-8"))
 
@@ -100,10 +161,10 @@ def _eval_one(text: str, idx: int) -> dict[str, Any]:
 
     try:
         t0 = time.time()
-        stats = compress_to_file(text, tmp_path)
+        stats = main_module.compress_to_file(text, tmp_path)
         elapsed = time.time() - t0
 
-        compressed_size = stats.get("compressed_size", 0)   # arithmetic bitstream bytes
+        compressed_size = stats.get("compressed_size", 0)
         bpb = (compressed_size * 8) / original_bytes if original_bytes else float("inf")
 
         return {
@@ -117,80 +178,113 @@ def _eval_one(text: str, idx: int) -> dict[str, Any]:
             "elapsed_s": round(elapsed, 2),
         }
     except Exception as exc:
+        import traceback
         return {
             "sample": idx,
             "original_bytes": original_bytes,
             "error": str(exc),
+            "traceback": traceback.format_exc() if verbose else None,
             "bpb": None,
         }
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+        # Restore originals
+        main_module._get_nlp = _orig_get_nlp
+        main_module._run_discourse = _orig_run_discourse
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate Lexis pipeline bpb on FineWeb samples"
     )
-    parser.add_argument("--samples", type=int, default=10,
-                        help="Number of FineWeb documents to evaluate (default: 10)")
+    parser.add_argument("--samples", type=int, default=50,
+                        help="Number of FineWeb documents to evaluate (default: 50)")
     parser.add_argument("--chars", type=int, default=5000,
                         help="Max chars per document, 0=unlimited (default: 5000)")
-    parser.add_argument("--split", type=str, default="train",
-                        help="FineWeb dataset split (default: train)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed (default: 42)")
+    parser.add_argument("--split", type=str, default="train")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out", type=str, default=None,
                         help="Optional path to write JSON results")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print per-sample details and tracebacks on error")
+    parser.add_argument("--spacy-model", type=str, default="en_core_web_lg",
+                        dest="spacy_model")
     args = parser.parse_args()
 
+    # Load models once
+    nlp, discourse_analyser = _init_models(args.spacy_model)
+
+    # Load documents
     documents = _load_fineweb(args.samples, args.chars, args.split, args.seed)
 
     results: list[dict] = []
+    t_total = time.time()
+
     for idx, doc in enumerate(documents):
-        print(f"\n[{idx+1}/{len(documents)}] Evaluating sample ({len(doc)} chars)...")
-        result = _eval_one(doc, idx)
-        results.append(result)
-        if result.get("bpb") is not None:
-            print(
-                f"  bpb:               {result['bpb']:.4f}"
-                f"\n  original_bytes:    {result['original_bytes']}"
-                f"\n  compressed_bytes:  {result['compressed_bytes']}"
-                f"\n  discourse_symbols: {result['discourse_symbols']}"
-                f"\n  elapsed:           {result['elapsed_s']}s"
-            )
+        if args.verbose:
+            print(f"\n[{idx+1}/{len(documents)}] Evaluating sample ({len(doc)} chars)...")
         else:
-            print(f"  ERROR: {result.get('error')}")
+            print(f"  [{idx+1:3d}/{len(documents)}] ", end="", flush=True)
+
+        result = _eval_one(doc, idx, nlp, discourse_analyser, verbose=args.verbose)
+        results.append(result)
+
+        if result.get("bpb") is not None:
+            if args.verbose:
+                print(
+                    f"  bpb: {result['bpb']:.4f}  "
+                    f"orig={result['original_bytes']}B  "
+                    f"comp={result['compressed_bytes']}B  "
+                    f"disc={result['discourse_symbols']}  "
+                    f"t={result['elapsed_s']}s"
+                )
+            else:
+                print(f"bpb={result['bpb']:.4f}  t={result['elapsed_s']}s")
+        else:
+            print(f"ERROR: {result.get('error', 'unknown')}")
+
+    total_elapsed = time.time() - t_total
 
     # Aggregate
     valid = [r for r in results if r.get("bpb") is not None]
     if valid:
-        avg_bpb = sum(r["bpb"] for r in valid) / len(valid)
-        min_bpb = min(r["bpb"] for r in valid)
-        max_bpb = max(r["bpb"] for r in valid)
+        bpb_values = [r["bpb"] for r in valid]
+        avg_bpb = sum(bpb_values) / len(bpb_values)
+        # population std dev
+        variance = sum((b - avg_bpb) ** 2 for b in bpb_values) / len(bpb_values)
+        std_bpb = variance ** 0.5
+        min_bpb = min(bpb_values)
+        max_bpb = max(bpb_values)
         total_orig = sum(r["original_bytes"] for r in valid)
         total_comp = sum(r["compressed_bytes"] for r in valid)
         overall_bpb = (total_comp * 8) / total_orig if total_orig else float("inf")
 
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 55)
         print("AGGREGATE RESULTS")
-        print("=" * 50)
-        print(f"  Samples evaluated:  {len(valid)}/{len(results)}")
-        print(f"  Avg bpb:            {avg_bpb:.4f}")
-        print(f"  Overall bpb:        {overall_bpb:.4f}  (total bytes)")
-        print(f"  Min bpb:            {min_bpb:.4f}")
-        print(f"  Max bpb:            {max_bpb:.4f}")
-        print(f"  Total original:     {total_orig:,} bytes")
-        print(f"  Total compressed:   {total_comp:,} bytes")
-        print("=" * 50)
+        print("=" * 55)
+        print(f"  Samples evaluated : {len(valid)}/{len(results)}")
+        print(f"  Avg bpb           : {avg_bpb:.4f}  (±{std_bpb:.4f} std)")
+        print(f"  Overall bpb       : {overall_bpb:.4f}  (pooled bytes)")
+        print(f"  Min / Max bpb     : {min_bpb:.4f} / {max_bpb:.4f}")
+        print(f"  Total original    : {total_orig:,} bytes")
+        print(f"  Total compressed  : {total_comp:,} bytes")
+        print(f"  Total elapsed     : {total_elapsed:.1f}s")
+        print("=" * 55)
 
         summary = {
             "samples_evaluated": len(valid),
             "avg_bpb": round(avg_bpb, 4),
+            "std_bpb": round(std_bpb, 4),
             "overall_bpb": round(overall_bpb, 4),
             "min_bpb": round(min_bpb, 4),
             "max_bpb": round(max_bpb, 4),
             "total_original_bytes": total_orig,
             "total_compressed_bytes": total_comp,
+            "total_elapsed_s": round(total_elapsed, 1),
             "per_sample": results,
         }
     else:
@@ -199,7 +293,7 @@ def main() -> None:
 
     if args.out:
         Path(args.out).write_text(json.dumps(summary, indent=2))
-        print(f"\nResults written to: {args.out}")
+        print(f"Results written to: {args.out}")
 
 
 if __name__ == "__main__":
