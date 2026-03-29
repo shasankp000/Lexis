@@ -1,0 +1,513 @@
+{
+  "samples_evaluated": 50,
+  "avg_bpb": 2.8076,
+  "std_bpb": 0.0842,
+  "overall_bpb": 2.7587,
+  "min_bpb": 2.6815,
+  "max_bpb": 2.9827,
+  "total_original_bytes": 103447,
+  "total_compressed_bytes": 35672,
+  "total_elapsed_s": 88.2,
+  "per_sample": [
+    {
+      "sample": 0,
+      "original_bytes": 346,
+      "compressed_bytes": 129,
+      "bpb": 2.9827,
+      "compression_ratio": 0.3728,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.55
+    },
+    {
+      "sample": 1,
+      "original_bytes": 1152,
+      "compressed_bytes": 402,
+      "bpb": 2.7917,
+      "compression_ratio": 0.349,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.47
+    },
+    {
+      "sample": 2,
+      "original_bytes": 2137,
+      "compressed_bytes": 724,
+      "bpb": 2.7103,
+      "compression_ratio": 0.3388,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.64
+    },
+    {
+      "sample": 3,
+      "original_bytes": 2908,
+      "compressed_bytes": 990,
+      "bpb": 2.7235,
+      "compression_ratio": 0.3404,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.15
+    },
+    {
+      "sample": 4,
+      "original_bytes": 789,
+      "compressed_bytes": 278,
+      "bpb": 2.8188,
+      "compression_ratio": 0.3523,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.35
+    },
+    {
+      "sample": 5,
+      "original_bytes": 2368,
+      "compressed_bytes": 804,
+      "bpb": 2.7162,
+      "compression_ratio": 0.3395,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.73
+    },
+    {
+      "sample": 6,
+      "original_bytes": 524,
+      "compressed_bytes": 192,
+      "bpb": 2.9313,
+      "compression_ratio": 0.3664,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.35
+    },
+    {
+      "sample": 7,
+      "original_bytes": 2744,
+      "compressed_bytes": 948,
+      "bpb": 2.7638,
+      "compression_ratio": 0.3455,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.89
+    },
+    {
+      "sample": 8,
+      "original_bytes": 462,
+      "compressed_bytes": 171,
+      "bpb": 2.961,
+      "compression_ratio": 0.3701,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.33
+    },
+    {
+      "sample": 9,
+      "original_bytes": 5020,
+      "compressed_bytes": 1719,
+      "bpb": 2.7394,
+      "compression_ratio": 0.3424,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.31
+    },
+    {
+      "sample": 10,
+      "original_bytes": 1150,
+      "compressed_bytes": 406,
+      "bpb": 2.8243,
+      "compression_ratio": 0.353,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.89
+    },
+    {
+      "sample": 11,
+      "original_bytes": 562,
+      "compressed_bytes": 202,
+      "bpb": 2.8754,
+      "compression_ratio": 0.3594,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.36
+    },
+    {
+      "sample": 12,
+      "original_bytes": 792,
+      "compressed_bytes": 283,
+      "bpb": 2.8586,
+      "compression_ratio": 0.3573,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.4
+    },
+    {
+      "sample": 13,
+      "original_bytes": 4128,
+      "compressed_bytes": 1391,
+      "bpb": 2.6957,
+      "compression_ratio": 0.337,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.05
+    },
+    {
+      "sample": 14,
+      "original_bytes": 5000,
+      "compressed_bytes": 1712,
+      "bpb": 2.7392,
+      "compression_ratio": 0.3424,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.6
+    },
+    {
+      "sample": 15,
+      "original_bytes": 605,
+      "compressed_bytes": 221,
+      "bpb": 2.9223,
+      "compression_ratio": 0.3653,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.35
+    },
+    {
+      "sample": 16,
+      "original_bytes": 1852,
+      "compressed_bytes": 650,
+      "bpb": 2.8078,
+      "compression_ratio": 0.351,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.05
+    },
+    {
+      "sample": 17,
+      "original_bytes": 735,
+      "compressed_bytes": 269,
+      "bpb": 2.9279,
+      "compression_ratio": 0.366,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.33
+    },
+    {
+      "sample": 18,
+      "original_bytes": 5014,
+      "compressed_bytes": 1691,
+      "bpb": 2.698,
+      "compression_ratio": 0.3373,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.1
+    },
+    {
+      "sample": 19,
+      "original_bytes": 744,
+      "compressed_bytes": 264,
+      "bpb": 2.8387,
+      "compression_ratio": 0.3548,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.34
+    },
+    {
+      "sample": 20,
+      "original_bytes": 830,
+      "compressed_bytes": 292,
+      "bpb": 2.8145,
+      "compression_ratio": 0.3518,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.37
+    },
+    {
+      "sample": 21,
+      "original_bytes": 1764,
+      "compressed_bytes": 631,
+      "bpb": 2.8617,
+      "compression_ratio": 0.3577,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.68
+    },
+    {
+      "sample": 22,
+      "original_bytes": 821,
+      "compressed_bytes": 287,
+      "bpb": 2.7966,
+      "compression_ratio": 0.3496,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.41
+    },
+    {
+      "sample": 23,
+      "original_bytes": 674,
+      "compressed_bytes": 238,
+      "bpb": 2.8249,
+      "compression_ratio": 0.3531,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.79
+    },
+    {
+      "sample": 24,
+      "original_bytes": 3358,
+      "compressed_bytes": 1138,
+      "bpb": 2.7111,
+      "compression_ratio": 0.3389,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.94
+    },
+    {
+      "sample": 25,
+      "original_bytes": 622,
+      "compressed_bytes": 227,
+      "bpb": 2.9196,
+      "compression_ratio": 0.365,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.36
+    },
+    {
+      "sample": 26,
+      "original_bytes": 3806,
+      "compressed_bytes": 1324,
+      "bpb": 2.783,
+      "compression_ratio": 0.3479,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.08
+    },
+    {
+      "sample": 27,
+      "original_bytes": 5028,
+      "compressed_bytes": 1702,
+      "bpb": 2.708,
+      "compression_ratio": 0.3385,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.23
+    },
+    {
+      "sample": 28,
+      "original_bytes": 700,
+      "compressed_bytes": 246,
+      "bpb": 2.8114,
+      "compression_ratio": 0.3514,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.44
+    },
+    {
+      "sample": 29,
+      "original_bytes": 5036,
+      "compressed_bytes": 1688,
+      "bpb": 2.6815,
+      "compression_ratio": 0.3352,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.55
+    },
+    {
+      "sample": 30,
+      "original_bytes": 2548,
+      "compressed_bytes": 888,
+      "bpb": 2.7881,
+      "compression_ratio": 0.3485,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.9
+    },
+    {
+      "sample": 31,
+      "original_bytes": 386,
+      "compressed_bytes": 140,
+      "bpb": 2.9016,
+      "compression_ratio": 0.3627,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.32
+    },
+    {
+      "sample": 32,
+      "original_bytes": 3344,
+      "compressed_bytes": 1178,
+      "bpb": 2.8182,
+      "compression_ratio": 0.3523,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.01
+    },
+    {
+      "sample": 33,
+      "original_bytes": 2013,
+      "compressed_bytes": 698,
+      "bpb": 2.774,
+      "compression_ratio": 0.3467,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.77
+    },
+    {
+      "sample": 34,
+      "original_bytes": 5157,
+      "compressed_bytes": 1741,
+      "bpb": 2.7008,
+      "compression_ratio": 0.3376,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.81
+    },
+    {
+      "sample": 35,
+      "original_bytes": 1991,
+      "compressed_bytes": 687,
+      "bpb": 2.7604,
+      "compression_ratio": 0.3451,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.59
+    },
+    {
+      "sample": 36,
+      "original_bytes": 1600,
+      "compressed_bytes": 552,
+      "bpb": 2.76,
+      "compression_ratio": 0.345,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.48
+    },
+    {
+      "sample": 37,
+      "original_bytes": 4338,
+      "compressed_bytes": 1461,
+      "bpb": 2.6943,
+      "compression_ratio": 0.3368,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.01
+    },
+    {
+      "sample": 38,
+      "original_bytes": 865,
+      "compressed_bytes": 319,
+      "bpb": 2.9503,
+      "compression_ratio": 0.3688,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.5
+    },
+    {
+      "sample": 39,
+      "original_bytes": 502,
+      "compressed_bytes": 186,
+      "bpb": 2.9641,
+      "compression_ratio": 0.3705,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.38
+    },
+    {
+      "sample": 40,
+      "original_bytes": 502,
+      "compressed_bytes": 181,
+      "bpb": 2.8845,
+      "compression_ratio": 0.3606,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.35
+    },
+    {
+      "sample": 41,
+      "original_bytes": 5000,
+      "compressed_bytes": 1687,
+      "bpb": 2.6992,
+      "compression_ratio": 0.3374,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.65
+    },
+    {
+      "sample": 42,
+      "original_bytes": 930,
+      "compressed_bytes": 334,
+      "bpb": 2.8731,
+      "compression_ratio": 0.3591,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.38
+    },
+    {
+      "sample": 43,
+      "original_bytes": 1655,
+      "compressed_bytes": 566,
+      "bpb": 2.736,
+      "compression_ratio": 0.342,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.55
+    },
+    {
+      "sample": 44,
+      "original_bytes": 1828,
+      "compressed_bytes": 648,
+      "bpb": 2.8359,
+      "compression_ratio": 0.3545,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.65
+    },
+    {
+      "sample": 45,
+      "original_bytes": 2877,
+      "compressed_bytes": 1033,
+      "bpb": 2.8724,
+      "compression_ratio": 0.3591,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.15
+    },
+    {
+      "sample": 46,
+      "original_bytes": 2560,
+      "compressed_bytes": 869,
+      "bpb": 2.7156,
+      "compression_ratio": 0.3395,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 2.12
+    },
+    {
+      "sample": 47,
+      "original_bytes": 1153,
+      "compressed_bytes": 392,
+      "bpb": 2.7199,
+      "compression_ratio": 0.34,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.44
+    },
+    {
+      "sample": 48,
+      "original_bytes": 326,
+      "compressed_bytes": 117,
+      "bpb": 2.8712,
+      "compression_ratio": 0.3589,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.32
+    },
+    {
+      "sample": 49,
+      "original_bytes": 2201,
+      "compressed_bytes": 776,
+      "bpb": 2.8205,
+      "compression_ratio": 0.3526,
+      "discourse_symbols": 0,
+      "discourse_reduction_pct": 0.0,
+      "elapsed_s": 1.67
+    }
+  ]
+}
