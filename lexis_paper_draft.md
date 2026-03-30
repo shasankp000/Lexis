@@ -220,11 +220,21 @@ An important implication is that the gap between Lexis (2.75 bpb) and classical 
 
 **Punctuation normalisation edge case.** A single known edge case exists in Stage 1: sentences of the form `word. "Next` are normalised to `word." Next`, causing a single-character transposition. This does not affect bpb measurement but would prevent lossless round-trip on documents containing this pattern.
 
-**GPU acceleration not yet implemented.** Stage 7 is currently implemented as a CPU rANS encoder. The architectural design of Stages 5–7 anticipates GPU parallelisation, but this has not been benchmarked. Evaluation throughput is approximately 3.96 seconds per document at 10,000 characters on a single CPU core.
+**GPU acceleration not yet implemented.** Stage 7 is currently implemented as a CPU arithmetic coder. The architectural design of Stages 5–7 anticipates GPU parallelisation via the rANS encoder included in the codebase, but this has not been benchmarked. Evaluation throughput is approximately 3.96 seconds per document at 10,000 characters on a single CPU core.
 
 ### 5.3 Future Work
 
-*[To be completed in a future revision.]*
+**Multilingual extension.** The current pipeline is designed specifically for English. Extending Lexis to other languages requires replacing the English-specific components at each structural layer: the phonetic class assignments in Stage 5 would need language-specific phonological inventories, the 13 morphological transformation codes in Stage 2 would need to be expanded substantially for morphologically rich languages such as Turkish or Finnish, and the coreference model in Stage 4 would require a multilingual or language-specific alternative to the English-fine-tuned model currently used. A natural first step would be adding a translation preprocessing layer that maps input text to English before compression and stores the source language as metadata, restoring the original language at decompression time. This approach trades translation fidelity for implementation simplicity and would be appropriate for languages with high-quality machine translation support.
+
+**Post-pipeline general-purpose compression.** The output of the Lexis arithmetic coder is a bitstream that has been compressed with respect to the linguistic probability model but may still contain residual statistical redundancy not captured by that model — for example, byte-level patterns in the encoded metadata, or regularities in the symbol table encoding. Applying a general-purpose compressor such as zstd or bzip2 as a final stage after the Lexis pipeline could recover these residual savings at low computational cost, potentially reducing the final artifact size further without requiring changes to the core pipeline.
+
+**GPU acceleration of the entropy coding stage.** Stage 7 currently uses a sequential CPU arithmetic coder. The rANS encoder included in the codebase is better suited to GPU parallelisation, as independent symbol subsequences can be encoded in parallel and their states merged during finalisation. Porting the frequency table lookups and state update logic to CUDA kernels would allow the entropy coding step to use the available GPU hardware and reduce per-document encoding time, which currently averages 3.96 seconds per 10,000-character document on a single CPU core.
+
+**Discourse threshold conditioning.** Finding 5 establishes that Stage 4 is net-negative on documents shorter than approximately 800 bytes. A practical improvement would be to condition Stage 4 activation on a lightweight document-length or entity-density estimate computed before coreference resolution, bypassing the Longformer inference step for documents unlikely to benefit from it. This would reduce average encoding time without affecting compression quality on the documents where Stage 4 contributes.
+
+**Extended discourse pointer system.** The current Stage 4 symbol table operates at the coreferring noun phrase level — it identifies named entities and noun phrases that refer to the same real-world referent across a document, replacing repeated occurrences with compact symbolic pointers. A natural extension would broaden this to arbitrary repeating token sequences regardless of coreference: repeated syntactic templates, recurring clausal patterns, boilerplate phrases, and structurally similar sentences that share a grammatical skeleton but differ in their lexical content. Such a system would represent repeated structures as templates with variable slots, storing the template once and encoding subsequent occurrences as a pointer plus a compact slot-filling delta. This generalises the current approach from entity-level compression to full structural deduplication across the document, and would be particularly effective on long-form text with repetitive structure such as legal documents, technical manuals, and narrative fiction.
+
+**Richer probability modelling.** The Stage 6 context-mixing model operates as a lightweight online ensemble of three weak learners — a character bigram, a morphological context model, and a POS structural model — with adaptive gating that rewards the level making the best predictions at each step. Replacing this with a fuller PPM-style variable-order model, or extending the ensemble with additional context levels such as document topic or sentence position, could close the remaining gap between Lexis (2.75 bpb) and classical context-mixing systems such as cmix (≈2.0 bpb).
 
 ---
 
@@ -263,4 +273,4 @@ This work was conducted as an independent research contribution to the OpenAI Pa
 
 ---
 
-*Draft status: Abstract ✅ | Introduction ✅ | Related Work ✅ | Architecture ✅ | Results ✅ | Discussion ✅ | Conclusion ✅ | Future Work 🔲*
+*Draft status: Abstract ✅ | Introduction ✅ | Related Work ✅ | Architecture ✅ | Results ✅ | Discussion ✅ | Conclusion ✅ | Future Work ✅*
