@@ -134,19 +134,19 @@ class ArithmeticEncoder:
         return self.writer.get_bytes()
 
     def _encode_symbol(self, symbol: int, distribution: Dict[int, float]) -> None:
-        symbols, cumulative = _build_cumulative(distribution)
+        symbols, cumulative = _build_cumulative_int(distribution, self.high - self.low + 1)
         if symbol not in symbols:
             raise ValueError(f"Symbol {symbol} missing from distribution.")
 
         idx = symbols.index(symbol)
-        low_sym = cumulative[idx]
+        low_sym  = cumulative[idx]
         high_sym = cumulative[idx + 1]
 
         range_width = self.high - self.low + 1
-        low_new = self.low + int(range_width * low_sym)
-        high_new = self.low + int(range_width * high_sym) - 1
+        low_new  = self.low + low_sym
+        high_new = self.low + high_sym - 1
 
-        self.low = low_new
+        self.low  = low_new
         self.high = max(high_new, self.low)
 
         self._renormalize()
@@ -163,15 +163,15 @@ class ArithmeticEncoder:
                 self._output_bit(0)
             elif self.low >= self.HALF:
                 self._output_bit(1)
-                self.low -= self.HALF
+                self.low  -= self.HALF
                 self.high -= self.HALF
             elif self.low >= self.QUARTER and self.high < self.THREE_QUARTER:
                 self.pending += 1
-                self.low -= self.QUARTER
+                self.low  -= self.QUARTER
                 self.high -= self.QUARTER
             else:
                 break
-            self.low = self.low * 2
+            self.low  = self.low  * 2
             self.high = self.high * 2 + 1
 
     def _finalize(self) -> None:
@@ -194,8 +194,8 @@ class ArithmeticDecoder:
     def __init__(self) -> None:
         self.reader: _BitReader | None = None
         self.value = 0
-        self.low = 0
-        self.high = (1 << 32) - 1
+        self.low   = 0
+        self.high  = (1 << 32) - 1
 
     def decode(
         self,
@@ -205,7 +205,9 @@ class ArithmeticDecoder:
         num_symbols: int,
     ) -> List[int]:
         self.reader = _BitReader(compressed_bytes)
-        self.value = 0
+        self.value  = 0
+        self.low    = 0
+        self.high   = (1 << 32) - 1
         for _ in range(32):
             self.value = (self.value << 1) | self._read_bit()
 
@@ -218,10 +220,10 @@ class ArithmeticDecoder:
         length = min(num_symbols, len(morph_stream), len(pos_stream))
         for idx in range(length):
             context = {
-                "char_history": list(char_history),
+                "char_history":       list(char_history),
                 "current_morph_code": morph_stream[idx],
-                "current_pos_tag": pos_stream[idx],
-                "struct_prob": struct_probs[idx],
+                "current_pos_tag":    pos_stream[idx],
+                "struct_prob":        struct_probs[idx],
             }
             distribution = context_model.probability_distribution(context)
             symbol = self._decode_symbol(distribution)
@@ -235,9 +237,9 @@ class ArithmeticDecoder:
     ) -> List[int]:
         """Decode a symbol stream using a fixed unigram distribution."""
         self.reader = _BitReader(compressed_bytes)
-        self.value = 0
-        self.low = 0
-        self.high = (1 << 32) - 1
+        self.value  = 0
+        self.low    = 0
+        self.high   = (1 << 32) - 1
         for _ in range(32):
             self.value = (self.value << 1) | self._read_bit()
         decoded: List[int] = []
@@ -251,9 +253,9 @@ class ArithmeticDecoder:
     ) -> List[int]:
         """Decode a symbol stream using integer unigram counts."""
         self.reader = _BitReader(compressed_bytes)
-        self.value = 0
-        self.low = 0
-        self.high = (1 << 32) - 1
+        self.value  = 0
+        self.low    = 0
+        self.high   = (1 << 32) - 1
         for _ in range(32):
             self.value = (self.value << 1) | self._read_bit()
 
@@ -262,37 +264,49 @@ class ArithmeticDecoder:
         for _ in range(num_symbols):
             range_width = self.high - self.low + 1
             scaled = ((self.value - self.low + 1) * total - 1) // range_width
-            idx = max(bisect_right(cumulative, scaled) - 1, 0)
+            idx    = max(bisect_right(cumulative, scaled) - 1, 0)
             symbol = symbols_sorted[min(idx, len(symbols_sorted) - 1)]
-            low_sym = cumulative[idx]
+            low_sym  = cumulative[idx]
             high_sym = cumulative[idx + 1]
-            low_new = self.low + (range_width * low_sym) // total
+            low_new  = self.low + (range_width * low_sym)  // total
             high_new = self.low + (range_width * high_sym) // total - 1
-            self.low = low_new
+            self.low  = low_new
             self.high = max(high_new, self.low)
             self._renormalize()
             decoded.append(symbol)
         return decoded
 
     def _decode_symbol(self, distribution: Dict[int, float]) -> int:
-        symbols, cumulative = _build_cumulative(distribution)
-        range_width = self.high - self.low + 1
-        position = (self.value - self.low + 1) / range_width
+        """
+        Decode one symbol using the same integer arithmetic as _encode_symbol.
 
-        symbol = symbols[-1]
-        low_sym = cumulative[-2]
+        Both encoder and decoder now compute CDF intervals as:
+            low_int  = int(range_width * float_cumulative[i])
+            high_int = int(range_width * float_cumulative[i+1])
+        so the interval boundaries are identical on both sides.
+        """
+        range_width = self.high - self.low + 1
+        symbols, cumulative = _build_cumulative_int(distribution, range_width)
+
+        # scaled_value is the encoder's offset into [0, range_width)
+        scaled_value = self.value - self.low
+
+        # Find the symbol whose integer interval contains scaled_value.
+        # cumulative[i] <= scaled_value < cumulative[i+1]
+        symbol   = symbols[-1]
+        low_sym  = cumulative[-2]
         high_sym = cumulative[-1]
-        for idx, sym in enumerate(symbols):
-            if position <= cumulative[idx + 1]:
-                symbol = sym
-                low_sym = cumulative[idx]
+        for idx in range(len(symbols)):
+            if scaled_value < cumulative[idx + 1]:
+                symbol   = symbols[idx]
+                low_sym  = cumulative[idx]
                 high_sym = cumulative[idx + 1]
                 break
 
-        low_new = self.low + int(range_width * low_sym)
-        high_new = self.low + int(range_width * high_sym) - 1
+        low_new  = self.low + low_sym
+        high_new = self.low + high_sym - 1
 
-        self.low = low_new
+        self.low  = low_new
         self.high = max(high_new, self.low)
 
         self._renormalize()
@@ -304,16 +318,16 @@ class ArithmeticDecoder:
                 pass
             elif self.low >= self.HALF:
                 self.value -= self.HALF
-                self.low -= self.HALF
-                self.high -= self.HALF
+                self.low   -= self.HALF
+                self.high  -= self.HALF
             elif self.low >= self.QUARTER and self.high < self.THREE_QUARTER:
                 self.value -= self.QUARTER
-                self.low -= self.QUARTER
-                self.high -= self.QUARTER
+                self.low   -= self.QUARTER
+                self.high  -= self.QUARTER
             else:
                 break
-            self.low = self.low * 2
-            self.high = self.high * 2 + 1
+            self.low   = self.low   * 2
+            self.high  = self.high  * 2 + 1
             self.value = self.value * 2 + self._read_bit()
 
     def _read_bit(self) -> int:
@@ -323,6 +337,7 @@ class ArithmeticDecoder:
 
 
 def _build_cumulative(distribution: Dict[int, float]) -> Tuple[List[int], List[float]]:
+    """Build a float CDF — kept for any legacy callers."""
     if not distribution:
         return [0], [0.0, 1.0]
     total = sum(distribution.values())
@@ -336,6 +351,51 @@ def _build_cumulative(distribution: Dict[int, float]) -> Tuple[List[int], List[f
         cumulative.append(min(running, 1.0))
     cumulative[-1] = 1.0
     return symbols, cumulative
+
+
+def _build_cumulative_int(
+    distribution: Dict[int, float], range_width: int
+) -> Tuple[List[int], List[int]]:
+    """
+    Build an integer CDF scaled to range_width.
+
+    cumulative[i]   = int(range_width * float_prob_up_to_i)
+    cumulative[i+1] = int(range_width * float_prob_up_to_i+1)
+
+    This is the exact same arithmetic used in _encode_symbol so
+    encoder and decoder always agree on interval boundaries.
+    Each symbol is guaranteed at least 1 unit of probability mass
+    so no symbol ever has a zero-width interval.
+    """
+    if not distribution:
+        return [0], [0, range_width]
+    total = sum(distribution.values())
+    if total <= 0:
+        total = 1.0
+    symbols = sorted(distribution.keys())
+    n = len(symbols)
+
+    # Build float cumulative first
+    float_cum = [0.0]
+    running = 0.0
+    for sym in symbols:
+        running += distribution[sym] / total
+        float_cum.append(min(running, 1.0))
+    float_cum[-1] = 1.0
+
+    # Convert to integers
+    int_cum = [int(range_width * p) for p in float_cum]
+    int_cum[-1] = range_width  # guarantee last boundary == range_width exactly
+
+    # Ensure every symbol has at least width 1 (prevents zero-width intervals)
+    for i in range(n):
+        if int_cum[i + 1] <= int_cum[i]:
+            int_cum[i + 1] = int_cum[i] + 1
+    # Re-clamp the last boundary (may have grown beyond range_width)
+    if int_cum[-1] > range_width:
+        int_cum[-1] = range_width
+
+    return symbols, int_cum
 
 
 def _build_cumulative_counts(
@@ -356,14 +416,14 @@ def _build_cumulative_counts(
 def _build_context_stream(
     encoded_sentences: List[Dict],
 ) -> Tuple[List[int], List[str], List[float]]:
-    morph_stream: List[int] = []
-    pos_stream: List[str] = []
-    struct_probs: List[float] = []
+    morph_stream:  List[int]   = []
+    pos_stream:    List[str]   = []
+    struct_probs:  List[float] = []
 
     for sentence in encoded_sentences:
         char_morph_codes = sentence.get("char_morph_codes", [])
-        char_pos_tags = sentence.get("char_pos_tags", [])
-        n_tags = int(sentence.get("pos_n_tags", 0))
+        char_pos_tags    = sentence.get("char_pos_tags",    [])
+        n_tags       = int(sentence.get("pos_n_tags",      0))
         huffman_bits = float(sentence.get("pos_huffman_bits", 0.0))
         if n_tags > 0 and huffman_bits > 0:
             struct_prob = 2 ** (-huffman_bits / n_tags)
@@ -375,7 +435,9 @@ def _build_context_stream(
             morph_stream.append(
                 int(char_morph_codes[i]) if i < len(char_morph_codes) else 0
             )
-            pos_stream.append(str(char_pos_tags[i]) if i < len(char_pos_tags) else "X")
+            pos_stream.append(
+                str(char_pos_tags[i]) if i < len(char_pos_tags) else "X"
+            )
             struct_probs.append(struct_prob)
 
     return morph_stream, pos_stream, struct_probs
