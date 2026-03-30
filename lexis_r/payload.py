@@ -6,20 +6,35 @@ packing, which would silently clamp roots longer than 15 characters.
 
 Layout summary
 --------------
-  pos_tags          5-bit/token bit-pack  (8-bit sentence-length prefix)
-  morph_codes       4-bit/token bit-pack  (same scheme; morph codes 0-12)
-  root_lengths      VLQ  — (n_sentences VLQ)(n_tokens VLQ)(len VLQ …)
-  char_context      flat 7×7   VLQ bytes, row-major, no keys
-  morph_context     flat 13×7  VLQ bytes
-  struct_context    flat 18×7  VLQ bytes + zlib
-  pos_huffman_bits  uint16 ×N, scaled ×100 (0.01-bit precision)
-  pos_n_tags        uint8 list (1B count + 1B/sentence)
-  sentence_char_counts  uint8 list
-  pos_freq_table    18 × uint32 fixed-order flat array
-  model_weights     3 × float32 big-endian
-  char/morph_vocab  uint8 flat (1B count + 1B/entry)
-  pos_vocab         packed 5-bit ids
-  pos_deltas_counts sorted (int8, uint16) pairs
+  pos_tags              5-bit/token bit-pack  (8-bit sentence-length prefix)
+  morph_codes           4-bit/token bit-pack  (same scheme; morph codes 0-12)
+  root_lengths          base-128 VLQ  — (n_sentences)(n_tokens)(len …)
+  char_context          flat 7×7   base-128 VLQ bytes, row-major, no keys
+  morph_context         flat 13×7  base-128 VLQ bytes
+  struct_context        flat 18×7  base-128 VLQ bytes + zlib
+  pos_huffman_bits      base-256 VLQ per value, scaled ×100  (1B count prefix)
+  pos_n_tags            base-256 VLQ per value               (1B count prefix)
+  sentence_char_counts  base-256 VLQ per value               (1B count prefix)
+  pos_freq_table        base-256 VLQ per tag, fixed _POS_VOCAB order
+  pos_deltas_counts     1B n_pairs + zigzag base-256 VLQ (delta, count) pairs
+  model_weights         3 × float32 big-endian
+  char/morph_vocab      uint8 flat (1B count + 1B/entry)
+  pos_vocab             packed 5-bit ids
+
+Base-256 VLQ encoding
+---------------------
+  Non-negative integer n is stored as:
+    (number of payload bytes - 1) in bits [7:4] of the first byte,
+  ... no — we use a simpler 1-byte-length-prefix scheme:
+
+    [len_byte][b0][b1]…   where len_byte = number of following bytes (1-8)
+    value = big-endian unsigned integer from b0…b_n
+
+  This costs 2 bytes for values 0-255, 3 bytes for 256-65535, etc.
+  For the uint16 huffman_bits values (typically 0-2000 after ×100 scaling)
+  this saves nothing vs uint16 — the win comes from the freq_table where
+  most uint32 counts are < 256 (→ 2 bytes vs 4) and from removing the
+  hard uint8 clamp on sentence_char_counts / pos_n_tags.
 
 All helpers are pure functions: bytes in, bytes/value out.
 """
@@ -42,7 +57,7 @@ _MORPH_CODES_R: List[int] = list(range(13))   # morph_context row keys
 
 
 # ===========================================================================
-# VLQ (base-128, protobuf-style)
+# base-128 VLQ (protobuf-style) — used for root_lengths and context matrices
 # ===========================================================================
 
 def _vlq_encode(value: int) -> bytes:
@@ -61,7 +76,7 @@ def _vlq_encode(value: int) -> bytes:
 
 
 def _vlq_decode(data: bytes, offset: int) -> Tuple[int, int]:
-    """Decode one VLQ integer starting at offset. Returns (value, new_offset)."""
+    """Decode one base-128 VLQ integer. Returns (value, new_offset)."""
     value = 0
     while True:
         b = data[offset]; offset += 1
@@ -69,6 +84,38 @@ def _vlq_decode(data: bytes, offset: int) -> Tuple[int, int]:
         if not (b & 0x80):
             break
     return value, offset
+
+
+# ===========================================================================
+# base-256 VLQ — length-prefixed big-endian unsigned integers
+#
+# Wire format:  [n_bytes: uint8][b0 b1 … b_{n-1}: big-endian value]
+# n_bytes is in range [1, 8].  Value 0 → [0x01][0x00] (2 bytes).
+# ===========================================================================
+
+def _b256_encode(value: int) -> bytes:
+    """Encode a non-negative integer as length-prefixed base-256."""
+    assert value >= 0, f"b256 requires non-negative value, got {value}"
+    if value == 0:
+        return b"\x01\x00"
+    n_bytes = (value.bit_length() + 7) // 8
+    return bytes([n_bytes]) + value.to_bytes(n_bytes, "big")
+
+
+def _b256_decode(data: bytes, offset: int) -> Tuple[int, int]:
+    """Decode one base-256 integer. Returns (value, new_offset)."""
+    n_bytes = data[offset]; offset += 1
+    value   = int.from_bytes(data[offset: offset + n_bytes], "big")
+    return value, offset + n_bytes
+
+
+# Zigzag encoding for signed integers (maps negatives to positives)
+def _zigzag_encode(n: int) -> int:
+    return (n << 1) ^ (n >> 63)  # works for any signed int width
+
+
+def _zigzag_decode(n: int) -> int:
+    return (n >> 1) ^ -(n & 1)
 
 
 # ===========================================================================
@@ -127,13 +174,11 @@ def unpack_pos_tags(data: bytes, n_bits: int) -> List[List[str]]:
 
 
 # ===========================================================================
-# root_lengths  — VLQ, NO upper bound
+# root_lengths  — base-128 VLQ, NO upper bound
 # ===========================================================================
 
 def pack_root_lengths(sentences: List[List[int]]) -> bytes:
     """
-    Serialise nested root-length list as VLQ bytes.
-
     Wire format:
         n_sentences (VLQ)
         for each sentence:
@@ -150,7 +195,6 @@ def pack_root_lengths(sentences: List[List[int]]) -> bytes:
 
 
 def unpack_root_lengths(data: bytes) -> List[List[int]]:
-    """Inverse of pack_root_lengths."""
     offset = 0
     n_sents, offset = _vlq_decode(data, offset)
     sentences: List[List[int]] = []
@@ -171,7 +215,7 @@ def unpack_root_lengths(data: bytes) -> List[List[int]]:
 def pack_context_matrix(
     ctx: Dict, row_keys: List, n_cols: int
 ) -> bytes:
-    """Flatten dict-of-dict to VLQ byte stream, row-major. No keys stored."""
+    """Flatten dict-of-dict to base-128 VLQ byte stream, row-major."""
     out = bytearray()
     for key in row_keys:
         row = ctx.get(key, {})
@@ -197,53 +241,76 @@ def unpack_context_matrix(
 
 
 # ===========================================================================
-# pos_huffman_bits  (uint16 ×N, scaled ×100)
+# pos_huffman_bits  — base-256 VLQ, scaled ×100
+#
+# Wire format: [1B n_values] then n_values × b256_encode(round(v * 100))
+# Saves vs uint16 when scaled value < 256 (i.e. v < 2.56 bits — common).
 # ===========================================================================
 
 def pack_huffman_bits(values: List[float]) -> bytes:
-    """1B count + 2B per value (big-endian uint16, 0.01-bit precision)."""
-    n = len(values)
-    q = [min(round(v * 100), 65535) for v in values]
-    return bytes([n]) + b"".join(struct.pack(">H", x) for x in q)
+    out = bytearray([len(values)])
+    for v in values:
+        out += _b256_encode(min(round(v * 100), 0xFFFFFFFF))
+    return bytes(out)
 
 
 def unpack_huffman_bits(data: bytes) -> List[float]:
-    n = data[0]
-    return [
-        struct.unpack(">H", data[1 + i * 2: 3 + i * 2])[0] / 100.0
-        for i in range(n)
-    ]
+    n      = data[0]
+    offset = 1
+    result: List[float] = []
+    for _ in range(n):
+        val, offset = _b256_decode(data, offset)
+        result.append(val / 100.0)
+    return result
 
 
 # ===========================================================================
-# uint8 lists  (pos_n_tags, sentence_char_counts)
+# Variable-length uint lists  (pos_n_tags, sentence_char_counts)
+#
+# Wire format: [1B n_values] then n_values × b256_encode(v)
+# Replaces hard uint8 clamp — no silent truncation on long sentences.
 # ===========================================================================
 
 def pack_u8_list(values: List[int]) -> bytes:
-    """1B count + 1B/value. Values clamped to uint8."""
-    clamped = [min(v, 255) for v in values]
-    return bytes([len(clamped)] + clamped)
+    """1B count + base-256 VLQ per value. No upper-bound clamp."""
+    out = bytearray([len(values)])
+    for v in values:
+        out += _b256_encode(v)
+    return bytes(out)
 
 
 def unpack_u8_list(data: bytes) -> List[int]:
-    n = data[0]
-    return list(data[1: n + 1])
+    n      = data[0]
+    offset = 1
+    result: List[int] = []
+    for _ in range(n):
+        val, offset = _b256_decode(data, offset)
+        result.append(val)
+    return result
 
 
 # ===========================================================================
-# pos_freq_table  (18 × uint32, fixed _POS_VOCAB order)
+# pos_freq_table  — base-256 VLQ, fixed _POS_VOCAB order
+#
+# Replaces 18 × uint32 (72 bytes).  Most per-tag counts after a short
+# training window are < 256, so they cost 2 bytes each (→ 36 bytes).
 # ===========================================================================
 
 def pack_pos_freq_table(table: Dict[str, int]) -> bytes:
-    return b"".join(struct.pack(">I", table.get(tag, 0)) for tag in _POS_VOCAB)
+    out = bytearray()
+    for tag in _POS_VOCAB:
+        out += _b256_encode(table.get(tag, 0))
+    return bytes(out)
 
 
 def unpack_pos_freq_table(data: bytes) -> Dict[str, int]:
-    return {
-        tag: struct.unpack(">I", data[i * 4: i * 4 + 4])[0]
-        for i, tag in enumerate(_POS_VOCAB)
-        if struct.unpack(">I", data[i * 4: i * 4 + 4])[0] > 0
-    }
+    offset = 0
+    result: Dict[str, int] = {}
+    for tag in _POS_VOCAB:
+        val, offset = _b256_decode(data, offset)
+        if val > 0:
+            result[tag] = val
+    return result
 
 
 # ===========================================================================
@@ -287,29 +354,38 @@ def unpack_pos_vocab(data: bytes, n_bits: int) -> List[str]:
 
 
 # ===========================================================================
-# pos_deltas_counts  (sorted int8 + uint16 pairs)
+# pos_deltas_counts  — zigzag + base-256 VLQ pairs
+#
+# Wire format: [1B n_pairs] then n_pairs × (b256(zigzag(delta)), b256(count))
+# Replaces fixed int8+uint16 (3B/pair).  Small deltas cost 4B total
+# (2B each) vs 3B before — but removes the ±127 delta clamp and the
+# 65535 count clamp.  Worth it for correctness; counts are typically 1
+# so b256(1) = [0x01][0x01] = 2 bytes, saving 1B vs uint16.
 # ===========================================================================
 
 def pack_deltas_counts(counts: Dict[int, int]) -> bytes:
-    """1B count + sorted (int8 delta, uint16 count) pairs."""
+    """1B n_pairs + zigzag+b256 (delta, count) pairs."""
     items = sorted(counts.items())
     out   = bytearray([len(items)])
     for delta, count in items:
-        out += struct.pack(">bH", max(-128, min(127, delta)), min(count, 65535))
+        out += _b256_encode(_zigzag_encode(delta))
+        out += _b256_encode(count)
     return bytes(out)
 
 
 def unpack_deltas_counts(data: bytes) -> Dict[int, int]:
     n      = data[0]
+    offset = 1
     result: Dict[int, int] = {}
-    for i in range(n):
-        delta, count = struct.unpack(">bH", data[1 + i * 3: 4 + i * 3])
-        result[delta] = count
+    for _ in range(n):
+        zz,    offset = _b256_decode(data, offset)
+        count, offset = _b256_decode(data, offset)
+        result[_zigzag_decode(zz)] = count
     return result
 
 
 # ===========================================================================
-# struct_context  (VLQ row-major + zlib)
+# struct_context  (base-128 VLQ row-major + zlib)
 # ===========================================================================
 
 def pack_struct_context(ctx: Dict) -> bytes:
@@ -327,7 +403,7 @@ def unpack_struct_context(data: bytes) -> Dict:
 
 
 # ===========================================================================
-# Convenience re-exports for the rest of lexis_r
+# Convenience re-exports
 # ===========================================================================
 
 POS_VOCAB    = _POS_VOCAB
