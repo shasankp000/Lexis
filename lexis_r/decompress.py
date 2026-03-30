@@ -106,53 +106,13 @@ def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
-# Sentinel reconstruction
-# ---------------------------------------------------------------------------
-
-def _reconstruct_sentinel_deltas(
-    content_deltas: List[int],
-    sentence_char_counts: List[int],
-    root_lengths_nested: List[List[int]],
-) -> List[int]:
-    full: List[int] = []
-    content_iter    = iter(content_deltas)
-    prev_abs_pos: int | None = None
-
-    for s_idx, count in enumerate(sentence_char_counts):
-        lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
-        layout:       List[bool] = []
-        sentinel_abs: List[int]  = []
-
-        for t_idx, length in enumerate(lengths):
-            layout.append(True);  sentinel_abs.append(0)
-            for _ in range(length):
-                layout.append(False); sentinel_abs.append(-1)
-            layout.append(True);  sentinel_abs.append(1)
-            if t_idx < len(lengths) - 1:
-                layout.append(False); sentinel_abs.append(-1)
-
-        for is_sent, abs_pos_if_sent in zip(layout, sentinel_abs):
-            if is_sent:
-                target_abs = abs_pos_if_sent
-                delta = target_abs if prev_abs_pos is None else target_abs - prev_abs_pos
-                full.append(delta)
-                prev_abs_pos = target_abs
-            else:
-                delta = next(content_iter, 0)
-                if prev_abs_pos is None:
-                    prev_abs_pos = delta
-                else:
-                    prev_abs_pos = prev_abs_pos + delta
-                full.append(delta)
-
-    return full
-
-
-# ---------------------------------------------------------------------------
 # Character stream reconstruction
 # ---------------------------------------------------------------------------
 
 def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
+    """Cumulative sum of deltas -> absolute positions.
+    Each call is independent: prev resets to 0 implicitly via deltas[0].
+    """
     if not deltas:
         return []
     values = [deltas[0]]
@@ -161,31 +121,24 @@ def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
     return values
 
 
-def _reconstruct_chars(
-    char_classes:         List[int],
-    pos_deltas:           List[int],
+def _reconstruct_chars_per_sentence(
+    char_classes:        List[int],
+    pos_deltas_nested:   List[List[int]],
     sentence_char_counts: List[int],
 ) -> str:
+    """Reconstruct char stream, resetting the position counter per sentence."""
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     chars: List[str] = []
-    idx = 0
-    for count in sentence_char_counts:
-        classes   = char_classes[idx: idx + count]
-        deltas    = pos_deltas[idx:  idx + count]
+    cls_offset = 0
+    for s_idx, count in enumerate(sentence_char_counts):
+        classes = char_classes[cls_offset: cls_offset + count]
+        deltas  = pos_deltas_nested[s_idx] if s_idx < len(pos_deltas_nested) else []
         positions = _cumulative_from_deltas(deltas)
         for cls, pos in zip(classes, positions):
             ch = inverse_map.get((cls, pos))
             if ch is not None:
                 chars.append(ch)
-        idx += count
-    if idx < len(char_classes):
-        classes   = char_classes[idx:]
-        deltas    = pos_deltas[idx:]
-        positions = _cumulative_from_deltas(deltas)
-        for cls, pos in zip(classes, positions):
-            ch = inverse_map.get((cls, pos))
-            if ch is not None:
-                chars.append(ch)
+        cls_offset += count
     return "".join(chars)
 
 
@@ -206,8 +159,8 @@ def _split_roots(char_stream: str) -> List[str]:
     return roots
 
 
-_ATTACH_LEFT  = set(".,;:!?)'-—%-/")
-_ATTACH_RIGHT = set("($#/")
+_ATTACH_LEFT      = set(".,;:!?)'-—%-/")
+_ATTACH_RIGHT     = set("($#/")
 _OPEN_QUOTE_AFTER = set("!?( — ")
 
 
@@ -274,25 +227,29 @@ def decompress(input_path: str) -> str:
     )
 
     print("[Decompress] Huffman decoding pos_deltas...")
-    content_count  = int(payload["pos_deltas_content_count"])
-    content_deltas = huffman.decode(
+    total_count = int(payload["pos_deltas_total_count"])
+    flat_deltas = huffman.decode(
         bytes(payload["pos_deltas_huffman_table"]),
         bytes(payload["pos_deltas_huffman_stream"]),
-        content_count,
+        total_count,
     )
+
+    # Split flat deltas back into per-sentence lists
+    delta_lengths = unpack_u8_list(bytes(payload["pos_deltas_sentence_counts"]))
+    pos_deltas_nested: List[List[int]] = []
+    offset = 0
+    for length in delta_lengths:
+        pos_deltas_nested.append(flat_deltas[offset: offset + length])
+        offset += length
 
     sentence_char_counts = unpack_u8_list(
         bytes(payload["packed_sentence_char_counts"])
     )
-    root_lengths_nested = unpack_root_lengths(
-        bytes(payload["packed_root_lengths_vlq"])
-    )
-    pos_deltas = _reconstruct_sentinel_deltas(
-        content_deltas, sentence_char_counts, root_lengths_nested
-    )
 
-    char_stream = _reconstruct_chars(char_classes, pos_deltas, sentence_char_counts)
-    roots       = _split_roots(char_stream)
+    char_stream = _reconstruct_chars_per_sentence(
+        char_classes, pos_deltas_nested, sentence_char_counts
+    )
+    roots = _split_roots(char_stream)
 
     mc_data, mc_bits   = payload["packed_morph_codes"]
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
