@@ -242,7 +242,7 @@ Lexis demonstrates that the compression gap between naive byte-level tools and l
 
 ## Acknowledgements
 
-This work was conducted as an independent research contribution to the OpenAI Parameter Golf Challenge (March–April 2026). The research discussion and experimental design were developed with assistance from AI research tools including GitHub Copilot and Claude (Anthropic). All implementation, experimental execution, and analysis are the author's own.
+This work was conducted as an independent research contribution to the OpenAI Parameter Golf Challenge (March–April 2026). The research discussion, experimental design were developed and some implementation was done with assistance from AI research tools including GitHub Copilot and Claude (Anthropic). All experimental execution, and analysis are the author's own.
 
 ---
 
