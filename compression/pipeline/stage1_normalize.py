@@ -9,6 +9,8 @@ import re
 # pipeline (character encoder, phonetic map, _join_words) only ever sees
 # straight ASCII punctuation.
 _UNICODE_REPLACEMENTS: list[tuple[str, str]] = [
+    # BOM — must be first so it never reaches spaCy or the phonetic map
+    ("\ufeff", ""),
     # Single quotes / apostrophes
     ("\u2018", "'"),  # left single quotation mark
     ("\u2019", "'"),  # right single quotation mark / apostrophe
@@ -32,18 +34,19 @@ _UNICODE_REPLACEMENTS: list[tuple[str, str]] = [
 def normalize_text(text: str) -> str:
     """Normalize whitespace, line endings, and typographic punctuation.
 
-    Typographic quote and dash characters that fall outside the phonetic
-    alphabet are mapped to their ASCII equivalents before any other stage
-    processes the text.  This guarantees lossless round-trips for possessives
-    (e.g. "ahab\u2019s" -> "ahab's") and similar constructs.
+    Strips the UTF-8 BOM (\\ufeff) first so it never reaches spaCy or the
+    phonetic map.  Typographic quote and dash characters that fall outside
+    the phonetic alphabet are then mapped to their ASCII equivalents.
+    This guarantees lossless round-trips for possessives
+    (e.g. "ahab\\u2019s" -> "ahab's") and similar constructs.
     """
     if not text:
         return ""
 
     normalized = text
 
-    # Typographic -> ASCII punctuation (must come before whitespace collapse
-    # so that any incidental spaces introduced are handled below).
+    # BOM + typographic -> ASCII punctuation (must come before whitespace
+    # collapse so that any incidental spaces introduced are handled below).
     for src, dst in _UNICODE_REPLACEMENTS:
         normalized = normalized.replace(src, dst)
 
