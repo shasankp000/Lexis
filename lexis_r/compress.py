@@ -17,7 +17,7 @@ import os
 import tempfile
 import zlib
 from pathlib import Path
-from typing import Any, cast, Dict, List
+from typing import Any, cast, Dict, List, Tuple
 
 import msgpack
 
@@ -126,6 +126,44 @@ def _serialise_model(model: ContextMixingModel) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Sentinel stripping  (per-sentence, correct)
+# ---------------------------------------------------------------------------
+
+def _sentinel_layout(lengths: List[int]) -> List[bool]:
+    """True = sentinel position, False = content char position."""
+    layout: List[bool] = []
+    for t_idx, length in enumerate(lengths):
+        layout.append(True)            # ^
+        layout.extend([False] * length)
+        layout.append(True)            # $
+        if t_idx < len(lengths) - 1:
+            layout.append(False)       # space separator
+    return layout
+
+
+def _strip_sentinel_deltas_per_sentence(
+    pos_deltas_nested:   List[List[int]],
+    root_lengths_nested: List[List[int]],
+) -> Tuple[List[List[int]], List[int]]:
+    """Strip known sentinel deltas from each sentence independently.
+
+    Returns:
+        content_nested  : per-sentence content-only deltas
+        content_counts  : number of content deltas per sentence
+    """
+    content_nested: List[List[int]] = []
+    for s_idx, sent_deltas in enumerate(pos_deltas_nested):
+        lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
+        layout  = _sentinel_layout(lengths)
+        content = [
+            d for d, is_sent in zip(sent_deltas, layout) if not is_sent
+        ]
+        content_nested.append(content)
+    content_counts = [len(c) for c in content_nested]
+    return content_nested, content_counts
+
+
+# ---------------------------------------------------------------------------
 # Public compress function
 # ---------------------------------------------------------------------------
 
@@ -160,7 +198,7 @@ def compress(
     )
 
     char_classes:          List[int]       = []
-    pos_deltas_nested:     List[List[int]] = []   # per-sentence, NOT flattened
+    pos_deltas_nested:     List[List[int]] = []
     sentence_char_counts:  List[int]       = []
     pos_huffman_bits_list: List[float]     = []
     pos_n_tags_list:       List[int]       = []
@@ -171,7 +209,7 @@ def compress(
     for sent in encoded_sentences:
         cc = sent.get("char_classes", [])
         char_classes.extend(cc)
-        pos_deltas_nested.append(sent.get("pos_deltas", []))   # keep per-sentence
+        pos_deltas_nested.append(sent.get("pos_deltas", []))
         sentence_char_counts.append(len(cc))
         pos_huffman_bits_list.append(float(sent.get("pos_huffman_bits", 0.0)))
         pos_n_tags_list.append(int(sent.get("pos_n_tags", 0)))
@@ -179,17 +217,23 @@ def compress(
         morph_codes_nested.append(sent.get("morph_codes", []))
         root_lengths_nested.append([len(r) for r in sent.get("roots", [])])
 
-    # Flatten pos_deltas for Huffman encoding; store per-sentence lengths for reset
-    pos_deltas_flat    = [d for sent_d in pos_deltas_nested for d in sent_d]
-    pos_deltas_lengths = [len(sent_d) for sent_d in pos_deltas_nested]
+    # Strip sentinel deltas per sentence, then flatten for Huffman
+    print("[Stage 7] Stripping sentinel deltas (per-sentence)...")
+    content_nested, content_counts = _strip_sentinel_deltas_per_sentence(
+        pos_deltas_nested, root_lengths_nested
+    )
+    content_flat = [d for sent_c in content_nested for d in sent_c]
+    total_orig   = sum(len(s) for s in pos_deltas_nested)
+    total_strip  = sum(content_counts)
+    print(f"[Stage 7] pos_deltas: {total_orig} -> {total_strip} "
+          f"(stripped {total_orig - total_strip} sentinels across {len(pos_deltas_nested)} sentences)")
 
     print("[Stage 7] Arithmetic encoding char stream...")
     enc              = ArithmeticEncoder()
     compressed_bytes = enc.encode(char_classes, context_model, encoded_sentences)
 
     print("[Stage 7] Huffman encoding pos_deltas...")
-    huff_table_bytes, huff_bitstream = huffman.encode(pos_deltas_flat)
-    print(f"[Stage 7] pos_deltas: {len(pos_deltas_flat)} values across {len(pos_deltas_nested)} sentences")
+    huff_table_bytes, huff_bitstream = huffman.encode(content_flat)
 
     print("[Stage 7] LZ77 encoding pos_tags...")
     lz77_n_tokens  = sum(pos_n_tags_list)
@@ -206,8 +250,8 @@ def compress(
         "compressed_bitstream":        compressed_bytes,
         "pos_deltas_huffman_table":    huff_table_bytes,
         "pos_deltas_huffman_stream":   huff_bitstream,
-        "pos_deltas_total_count":      len(pos_deltas_flat),
-        "pos_deltas_sentence_counts":  pack_vlq_list(pos_deltas_lengths),
+        "pos_deltas_total_count":      total_strip,
+        "pos_deltas_content_counts":   pack_vlq_list(content_counts),
         "packed_pos_tags_lz77":        lz77_pos_bytes,
         "pos_tags_token_count":        lz77_n_tokens,
         "packed_sentence_char_counts": pack_vlq_list(sentence_char_counts),

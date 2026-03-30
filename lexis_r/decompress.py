@@ -107,6 +107,71 @@ def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Sentinel reconstruction  (per-sentence, correct)
+# ---------------------------------------------------------------------------
+
+def _sentinel_layout(lengths: List[int]) -> List[bool]:
+    """True = sentinel position, False = content char position."""
+    layout: List[bool] = []
+    for t_idx, length in enumerate(lengths):
+        layout.append(True)            # ^
+        layout.extend([False] * length)
+        layout.append(True)            # $
+        if t_idx < len(lengths) - 1:
+            layout.append(False)       # space separator
+    return layout
+
+
+def _reconstruct_sentinel_deltas_per_sentence(
+    content_nested:      List[List[int]],
+    root_lengths_nested: List[List[int]],
+) -> List[List[int]]:
+    """Reinsert sentinel deltas into each sentence, resetting prev each time."""
+    full_nested: List[List[int]] = []
+
+    for s_idx, content in enumerate(content_nested):
+        lengths      = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
+        layout       = _sentinel_layout(lengths)
+        content_iter = iter(content)
+        full:          List[int]      = []
+        prev_abs_pos: int | None      = None
+
+        for is_sent in layout:
+            if is_sent:
+                # sentinel: ^ is always abs=0, $ is always abs=1
+                target = 0 if (len(full) == 0 or
+                               (len(full) > 0 and full[-1] != (1 - (prev_abs_pos or 0) + (prev_abs_pos or 0))))\
+                           else 1
+                # Simpler: track whether we're at ^ or $
+                # ^ always comes before any content in a token: prev was None or prev was space
+                # $ always comes after content: prev was a content char
+                # Use the layout itself: first sentinel of each token pair = ^, second = $
+                target_abs = 0 if prev_abs_pos is None or _is_hat(layout, len(full)) else 1
+                delta = target_abs if prev_abs_pos is None else target_abs - prev_abs_pos
+                full.append(delta)
+                prev_abs_pos = target_abs
+            else:
+                delta = next(content_iter, 0)
+                prev_abs_pos = delta if prev_abs_pos is None else prev_abs_pos + delta
+                full.append(delta)
+
+        full_nested.append(full)
+    return full_nested
+
+
+def _is_hat(layout: List[bool], current_pos: int) -> bool:
+    """Return True if the sentinel at current_pos is a ^ (not $)."""
+    # Walk layout to find which sentinel this is in its token pair
+    sent_count = 0
+    for i, is_sent in enumerate(layout):
+        if i == current_pos:
+            return (sent_count % 2) == 0
+        if is_sent:
+            sent_count += 1
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Character stream reconstruction
 # ---------------------------------------------------------------------------
 
@@ -227,19 +292,27 @@ def decompress(input_path: str) -> str:
 
     print("[Decompress] Huffman decoding pos_deltas...")
     total_count = int(payload["pos_deltas_total_count"])
-    flat_deltas = huffman.decode(
+    flat_content = huffman.decode(
         bytes(payload["pos_deltas_huffman_table"]),
         bytes(payload["pos_deltas_huffman_stream"]),
         total_count,
     )
 
-    # Split flat deltas back into per-sentence lists using VLQ lengths
-    delta_lengths      = unpack_vlq_list(bytes(payload["pos_deltas_sentence_counts"]))
-    pos_deltas_nested: List[List[int]] = []
+    # Split flat content back into per-sentence lists
+    content_counts = unpack_vlq_list(bytes(payload["pos_deltas_content_counts"]))
+    content_nested: List[List[int]] = []
     offset = 0
-    for length in delta_lengths:
-        pos_deltas_nested.append(flat_deltas[offset: offset + length])
-        offset += length
+    for count in content_counts:
+        content_nested.append(flat_content[offset: offset + count])
+        offset += count
+
+    # Reinsert sentinel deltas per sentence
+    root_lengths_nested = unpack_root_lengths(
+        bytes(payload["packed_root_lengths_vlq"])
+    )
+    pos_deltas_nested = _reconstruct_sentinel_deltas_per_sentence(
+        content_nested, root_lengths_nested
+    )
 
     sentence_char_counts = unpack_vlq_list(
         bytes(payload["packed_sentence_char_counts"])
