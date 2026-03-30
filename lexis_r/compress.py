@@ -104,7 +104,7 @@ def _encode_sentences(
 
     encoded: list[dict] = []
     for morphology, syntax in tqdm(
-        sentence_data, desc="Stage 5 — encoding", unit="sent"
+        sentence_data, desc="Stage 5 \u2014 encoding", unit="sent"
     ):
         encoded.append(
             char_encoder.encode_sentence_full(
@@ -166,13 +166,9 @@ def compress(
 ) -> Dict[str, Any]:
     normalized = normalize_text(text)
 
-    # Stage 1b: substitute high-frequency words before morphological analysis
-    print("[Stage 1b] Frequency-based word substitution...")
-    normalized, word_table = encode_word_subs(normalized)
-    if word_table:
-        print(f"[Stage 1b] Substituted {len(word_table)} word types -> "
-              f"{sum(normalized.count(sym) for sym in word_table)} tokens replaced")
-
+    # Stage 4+5: entity/discourse encoding FIRST on clean normalized text.
+    # Entity span offsets are computed against the original text, so word
+    # substitution must NOT have run yet or offsets will be wrong.
     print("[Stage 4+5] Running discourse analysis...")
     disc_analyser = DiscourseAnalyser(use_spacy=True)
     stage4_result = disc_analyser.analyse_document(normalized)
@@ -184,10 +180,22 @@ def compress(
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    # Merge entity + word substitution tables for payload
+    # Stage 1b: word substitution AFTER entity encoding.
+    # Now §E tokens are already fixed in place; word subs operate on the
+    # entity-compressed text and cannot clobber entity span positions.
+    print("[Stage 1b] Frequency-based word substitution...")
+    after_word_subs, word_table = encode_word_subs(discourse_compressed)
+    if word_table:
+        print(f"[Stage 1b] Substituted {len(word_table)} word types -> "
+              f"{sum(after_word_subs.count(sym) for sym in word_table)} tokens replaced")
+    else:
+        print("[Stage 1b] No words met frequency threshold.")
+
+    # Merged symbol table: both §E and §W entries go into the payload.
+    # decode_symbols restores all of them transparently.
     symbol_table = merge_symbol_tables(entity_table, word_table)
 
-    encoded_sentences, pos_freq_table = _encode_sentences(discourse_compressed, model=model)
+    encoded_sentences, pos_freq_table = _encode_sentences(after_word_subs, model=model)
 
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
