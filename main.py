@@ -1,4 +1,25 @@
-"""Pipeline entry point and CLI wiring."""
+"""Pipeline entry point and CLI wiring.
+
+Two compression variants are supported:
+
+  Lexis-E  (--variant embedded, default)
+      The trained context model (char_context, morph_context, struct_context,
+      weights, vocabs) is serialised into the .lexis msgpack payload alongside
+      the arithmetic bitstream and structural metadata. Decompression is a
+      fast single pass that requires only msgpack — no spaCy re-analysis.
+      Trade-off: larger artifact (full-payload bpb ~23 on FineWeb-10BT).
+
+  Lexis-R  (--variant reconstructed)
+      The context model is omitted from the payload. At decompress time it
+      is reconstructed by re-training a fresh ContextMixingModel on the
+      encoded_sentences rebuilt from the stored pos_tags / morph_codes /
+      root_lengths arrays. Decompression requires spaCy.
+      Trade-off: smaller artifact, slower decompression.
+
+A 'lexis_variant' key is stamped in every payload produced by this module
+so the decompressor can identify the format without heuristics. Files
+produced before this key was introduced are treated as Lexis-E.
+"""
 
 from __future__ import annotations
 
@@ -43,6 +64,14 @@ from compression.pipeline.stage7_arithmetic import ArithmeticDecoder, Arithmetic
 from compression.pipeline.stage9_autocorrect import autocorrect
 from compression.pipeline.utils import chunk_text
 
+# Variant constants
+VARIANT_EMBEDDED = "embedded"       # Lexis-E: context model stored in payload
+VARIANT_RECONSTRUCTED = "reconstructed"  # Lexis-R: context model re-derived at decompress
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _get_nlp(model: str | None = None):
     model_name = model or SPACY_MODEL
@@ -268,9 +297,42 @@ def _join_words(words: list[str]) -> str:
 
 
 def _build_context_model_from_sentences(encoded_sentences: List[Dict]) -> ContextMixingModel:
-    """Train a fresh ContextMixingModel from already-encoded sentences."""
+    """Train a fresh ContextMixingModel from already-encoded sentences (Lexis-R path)."""
     model = ContextMixingModel()
     model.train(encoded_sentences)
+    return model
+
+
+def _build_context_model_from_payload(payload: Dict[str, Any]) -> ContextMixingModel:
+    """
+    Reconstruct a ContextMixingModel from a payload that contains serialised
+    context tables (Lexis-E path, and legacy files).
+    """
+    model = ContextMixingModel()
+    char_context: Dict = defaultdict(Counter)
+    morph_context: Dict = defaultdict(Counter)
+    struct_context: Dict = defaultdict(Counter)
+
+    for key, counter in payload.get("char_context", {}).items():
+        char_context[int(key)] = Counter(
+            {int(k): int(v) for k, v in dict(counter).items()}
+        )
+    for key, counter in payload.get("morph_context", {}).items():
+        morph_context[int(key)] = Counter(
+            {int(k): int(v) for k, v in dict(counter).items()}
+        )
+    for key, counter in payload.get("struct_context", {}).items():
+        struct_context[str(key)] = Counter(
+            {int(k): int(v) for k, v in dict(counter).items()}
+        )
+
+    model.char_context = char_context
+    model.morph_context = morph_context
+    model.struct_context = struct_context
+    model.weights = list(payload.get("model_weights", model.weights))
+    model.char_vocab = [int(v) for v in payload.get("char_vocab", model.char_vocab)]
+    model.morph_vocab = [int(v) for v in payload.get("morph_vocab", model.morph_vocab)]
+    model.pos_vocab = [str(v) for v in payload.get("pos_vocab", model.pos_vocab)]
     return model
 
 
@@ -312,18 +374,20 @@ def _build_encoded_sentences_from_metadata(payload: Dict[str, Any]) -> List[Dict
                 else 0.0,
                 "pos_n_tags": int(pos_n_tags[idx]) if idx < len(pos_n_tags) else 0,
                 "pos_tags": sentence_pos,
-                # char_classes not available here — filled in after decode
                 "morph_codes": sentence_morph,
             }
         )
     return encoded
 
 
+# ---------------------------------------------------------------------------
+# Core compression entry point
+# ---------------------------------------------------------------------------
+
 def compress(text: str, output_path: str, model: str | None = None) -> Dict:
-    """Run full available pipeline on text. Return stats."""
+    """Run full available pipeline on text (JSON analysis output). Return stats."""
     normalized = normalize_text(text)
 
-    # Stage 4+5: discourse symbol encoding
     print("[Stage 4+5] Running discourse analysis and symbol encoding...")
     discourse_compressed, symbol_table = _run_discourse(normalized)
     print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
@@ -367,27 +431,26 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
     return payload
 
 
-def compress_to_file(text: str, output_path: str, model: str | None = None) -> Dict:
+def compress_to_file(
+    text: str,
+    output_path: str,
+    model: str | None = None,
+    store_model: bool = True,
+) -> Dict:
     """
     Full compression pipeline with arithmetic coding.
 
-    Stage 4+5 (discourse symbol encoding) runs on the normalised text to
-    produce a symbol_table. The character/morphology pipeline then encodes
-    the *original normalised text* (not the \u00a7-symbol version), because \u00a7E{n}
-    tokens are outside the phonetic alphabet and would corrupt the character
-    stream. The symbol_table is stored in the msgpack payload and is applied
-    as the very last step in decompress() after join/case-restore.
-
-    The context model (char_context, morph_context, struct_context, weights,
-    vocabs) is NO LONGER stored in the payload. At decompress time the model
-    is reconstructed by re-running _encode_for_model() on a skeleton text
-    re-derived from the stored pos_tags/morph_codes/root_lengths arrays, then
-    re-training a fresh ContextMixingModel on those encoded_sentences.
-    This substantially reduces full-payload size.
+    Parameters
+    ----------
+    store_model : bool
+        True  → Lexis-E (embedded): serialise the trained context model into
+                 the payload for fast, dependency-free decompression.
+        False → Lexis-R (reconstructed): omit the context model; it will be
+                 re-trained from structural metadata at decompress time.
+                 Requires spaCy at decompress time. Produces a smaller artifact.
     """
     normalized = normalize_text(text)
 
-    # Stage 4+5: discourse symbol encoding (for token-count stats + symbol table)
     print("[Stage 4+5] Running discourse analysis and symbol encoding...")
     discourse_compressed, symbol_table = _run_discourse(normalized)
     print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
@@ -430,11 +493,10 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
     pos_delta_counts = Counter(char_pos_deltas)
     pos_deltas_stream = encoder.encode_unigram_counts(char_pos_deltas, pos_delta_counts)
 
-    # Context model is intentionally omitted from the payload.
-    # It is reconstructed at decompress time from the stored structural
-    # metadata (pos_tags, morph_codes, root_lengths) — see decompress().
-    metadata = {
-        # Stage 4+5 symbol table — required for decode
+    variant = VARIANT_EMBEDDED if store_model else VARIANT_RECONSTRUCTED
+
+    metadata: Dict[str, Any] = {
+        "lexis_variant": variant,
         "symbol_table": symbol_table,
         "compressed_bitstream": compressed_bytes,
         "pos_deltas_bitstream": pos_deltas_stream,
@@ -454,6 +516,24 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
         "pos_freq_table": pos_freq_table,
     }
 
+    if store_model:
+        # Lexis-E: embed the context model for fast decompression.
+        metadata.update({
+            "model_weights": context_model.weights,
+            "char_context": {
+                int(k): dict(v) for k, v in context_model.char_context.items()
+            },
+            "morph_context": {
+                int(k): dict(v) for k, v in context_model.morph_context.items()
+            },
+            "struct_context": {
+                str(k): dict(v) for k, v in context_model.struct_context.items()
+            },
+            "char_vocab": context_model.char_vocab,
+            "morph_vocab": context_model.morph_vocab,
+            "pos_vocab": context_model.pos_vocab,
+        })
+
     packed = msgpack.packb(metadata, use_bin_type=True)
     packed_bytes = cast(bytes, packed)
     Path(output_path).write_bytes(packed_bytes)
@@ -461,6 +541,7 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
     original_size = len(text.encode("utf-8"))
     compressed_size = len(compressed_bytes)
     return {
+        "lexis_variant": variant,
         "original_size": original_size,
         "compressed_size": compressed_size,
         "compression_ratio": compressed_size / original_size if original_size else 0.0,
@@ -472,20 +553,19 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
     }
 
 
+# ---------------------------------------------------------------------------
+# Decompression
+# ---------------------------------------------------------------------------
+
 def decompress(input_path: str) -> str:
     """
     Decompress a .lexis msgpack file.
 
-    If the payload contains a pre-built context model (legacy format: produced
-    before this refactor), it is used directly for backwards compatibility.
-
-    If the payload does NOT contain a pre-built context model (new format),
-    the model is reconstructed by:
-      1. Re-building encoded_sentences from the stored pos_tags/morph_codes/
-         root_lengths via _build_encoded_sentences_from_metadata().
-      2. Training a fresh ContextMixingModel on those encoded_sentences.
-    This produces an equivalent model to what was used at encode time, since
-    the context tables are fully determined by the structural metadata.
+    Format detection via the 'lexis_variant' key:
+      'embedded'      → Lexis-E: load serialised context model directly.
+      'reconstructed' → Lexis-R: re-train context model from structural metadata.
+      (absent)        → legacy file: treat as Lexis-E if char_context present,
+                        else Lexis-R.
     """
     raw = Path(input_path).read_bytes()
     payload: Dict[str, Any]
@@ -494,24 +574,24 @@ def decompress(input_path: str) -> str:
     except Exception:
         payload = json.loads(raw.decode("utf-8"))
 
-    # Retrieve symbol table for Stage 4+5 decode (may be absent in old payloads)
     symbol_table: dict = payload.get("symbol_table", {})
 
     if isinstance(payload, dict) and "compressed_bitstream" in payload:
-        # ----------------------------------------------------------------
-        # Reconstruct the context model.
-        # New format: context model was not stored — re-derive it.
-        # Legacy format: context model tables present — load directly.
-        # ----------------------------------------------------------------
         encoded_sentences = _build_encoded_sentences_from_metadata(payload)
 
-        if "char_context" in payload:
-            # Legacy path: load stored model for backwards compatibility.
-            print("[Decompress] Loading stored context model (legacy format)...")
-            context_model = _build_context_model_legacy(payload)
+        variant = payload.get("lexis_variant", None)
+
+        # Determine which path to take.
+        use_embedded = (
+            variant == VARIANT_EMBEDDED
+            or (variant is None and "char_context" in payload)
+        )
+
+        if use_embedded:
+            print(f"[Decompress] Lexis-E: loading embedded context model...")
+            context_model = _build_context_model_from_payload(payload)
         else:
-            # New path: re-train model from structural metadata.
-            print("[Decompress] Re-training context model from structural metadata...")
+            print(f"[Decompress] Lexis-R: re-training context model from structural metadata...")
             context_model = _build_context_model_from_sentences(encoded_sentences)
 
         decoder = ArithmeticDecoder()
@@ -563,44 +643,14 @@ def decompress(input_path: str) -> str:
     return ""
 
 
-def _build_context_model_legacy(payload: Dict[str, Any]) -> ContextMixingModel:
-    """
-    Reconstruct a ContextMixingModel from a legacy payload that contains
-    serialised context tables.
-    """
-    model = ContextMixingModel()
-    char_context = defaultdict(Counter)
-    morph_context = defaultdict(Counter)
-    struct_context = defaultdict(Counter)
-
-    for key, counter in payload.get("char_context", {}).items():
-        char_context[int(key)] = Counter(
-            {int(k): int(v) for k, v in dict(counter).items()}
-        )
-    for key, counter in payload.get("morph_context", {}).items():
-        morph_context[int(key)] = Counter(
-            {int(k): int(v) for k, v in dict(counter).items()}
-        )
-    for key, counter in payload.get("struct_context", {}).items():
-        struct_context[str(key)] = Counter(
-            {int(k): int(v) for k, v in dict(counter).items()}
-        )
-
-    model.char_context = char_context
-    model.morph_context = morph_context
-    model.struct_context = struct_context
-    model.weights = list(payload.get("model_weights", model.weights))
-    model.char_vocab = [int(v) for v in payload.get("char_vocab", model.char_vocab)]
-    model.morph_vocab = [int(v) for v in payload.get("morph_vocab", model.morph_vocab)]
-    model.pos_vocab = [str(v) for v in payload.get("pos_vocab", model.pos_vocab)]
-    return model
-
+# ---------------------------------------------------------------------------
+# Analysis mode
+# ---------------------------------------------------------------------------
 
 def analyse(text: str, model: str | None = None) -> None:
     """Run pipeline in analysis mode \u2014 print stats at each stage."""
     normalized = normalize_text(text)
 
-    # Stage 4+5
     print("[Stage 4+5] Running discourse analysis...")
     discourse_compressed, symbol_table = _run_discourse(normalized)
     orig_tokens = len(normalized.split())
@@ -657,25 +707,40 @@ def analyse(text: str, model: str | None = None) -> None:
     print(f"  weights: {[round(w, 4) for w in context_model.weights]}")
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def _read_text(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Hierarchical text compression pipeline"
+        description="Hierarchical text compression pipeline (Lexis-E / Lexis-R)"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     compress_parser = subparsers.add_parser("compress", help="Compress input text")
     compress_parser.add_argument("input", help="Input text file")
-    compress_parser.add_argument("output", help="Output binary file")
+    compress_parser.add_argument("output", help="Output .lexis file")
     compress_parser.add_argument(
-        "--model", default=None, help="spaCy model to use."
+        "--model", default=None, help="spaCy model to use"
+    )
+    compress_parser.add_argument(
+        "--variant",
+        choices=[VARIANT_EMBEDDED, VARIANT_RECONSTRUCTED],
+        default=VARIANT_EMBEDDED,
+        help=(
+            "'embedded' (default, Lexis-E): store context model in artifact "
+            "for fast decompression. "
+            "'reconstructed' (Lexis-R): omit context model; re-derive at "
+            "decompress time for a smaller artifact."
+        ),
     )
 
-    decompress_parser = subparsers.add_parser("decompress", help="Decompress archive")
-    decompress_parser.add_argument("input", help="Input binary file")
+    decompress_parser = subparsers.add_parser("decompress", help="Decompress a .lexis file")
+    decompress_parser.add_argument("input", help="Input .lexis file")
 
     analyse_parser = subparsers.add_parser("analyse", help="Analyse input text")
     analyse_parser.add_argument("input", help="Input text file")
@@ -685,8 +750,11 @@ def main() -> None:
 
     if args.command == "compress":
         text = _read_text(args.input)
-        compress(text, args.output, model=args.model)
-        print(f"Wrote compressed payload to {args.output}")
+        store_model = args.variant == VARIANT_EMBEDDED
+        result = compress_to_file(text, args.output, model=args.model, store_model=store_model)
+        variant_label = "Lexis-E" if store_model else "Lexis-R"
+        print(f"[{variant_label}] Wrote compressed payload to {args.output}")
+        print(f"[{variant_label}] char-stream bpb: {result['bpb']:.4f}")
     elif args.command == "decompress":
         reconstructed = decompress(args.input)
         print(reconstructed)
