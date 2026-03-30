@@ -3,25 +3,26 @@
 §W / §E / §R tokens cannot pass through the phonetic character encoder
 because '§' is not in PHONETIC_CLASSES and would be silently dropped.
 
-Approach: extract all §-tokens from the text BEFORE encoding, recording
-their word positions, then re-inject them into the decoded root list in
-the decompressor. Zero placeholder chars enter the char stream.
+Approach
+--------
+Compressor: strip all §-tokens from text before encoding, recording
+(char_offset, symbol) for each, where char_offset is the character
+position in the CLEAN text immediately before which the symbol appeared.
 
-Extract / inject contract
--------------------------
+Decompressor: after _join_words produces the final string, re-splice
+§-symbols at their saved positions using a char-offset mapping from the
+original clean text to the joined result. This is purely a string
+operation, fully decoupled from spaCy tokenisation.
+
+Contract
+--------
     clean_text, slot_map = extract_symbols(text)
-    # encode clean_text through char encoder ...
-    # decode back to root list ...
-    roots = inject_symbols(roots, slot_map)
-    # then _join_words(roots) -> text with § tokens in correct positions
-    # then decode_symbols restores originals
+    # ... encode clean_text, decode back to joined_text ...
+    result = splice_symbols(joined_text, slot_map)
+    result = decode_symbols(result, symbol_table)  # restores originals
 
-slot_map format: list of (word_index, symbol) pairs where word_index is
-the position in the token list AT WHICH the symbol should be re-inserted
-(i.e. before the token currently at that position in the clean list).
-
-Also exposes the older placeholder-based helpers (encode_slots_in_text,
-decode_slots_in_text, etc.) for backwards compatibility.
+slot_map format: list of (char_offset, symbol) pairs where char_offset
+is the byte position in clean_text before which the symbol was extracted.
 """
 
 from __future__ import annotations
@@ -29,13 +30,14 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Tuple
 
-_SYMBOL_RE  = re.compile(r"\u00a7[EWR]\d+")   # §E1, §W3, §R0 …
-_SLOT_RE    = re.compile(r"\bzz([a-z]+)\b", re.IGNORECASE)
+_SYMBOL_RE   = re.compile(r"\u00a7[EWR]\d+")   # §E1, §W3, §R0 …
+# Legacy placeholder support
+_SLOT_RE     = re.compile(r"\bzz([a-z]+)\b", re.IGNORECASE)
 _SLOT_PREFIX = "zz"
 
 
 # ---------------------------------------------------------------------------
-# Base-26 helpers (kept for placeholder fallback)
+# Base-26 helpers (legacy placeholder fallback)
 # ---------------------------------------------------------------------------
 
 def _idx_to_alpha(n: int) -> str:
@@ -60,81 +62,144 @@ def _make_slot(n: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# PRIMARY API: zero-overhead positional extraction
+# PRIMARY API: char-offset extraction + splice
 # ---------------------------------------------------------------------------
 
 def extract_symbols(
     text: str,
 ) -> Tuple[str, List[Tuple[int, str]]]:
     """
-    Strip all §-prefixed tokens from `text`, recording their positions.
+    Strip all §-prefixed tokens from `text`, recording char offsets.
 
-    Splits text on whitespace, identifies §-tokens, removes them, and
-    records (insertion_index, symbol) for each one where insertion_index
-    is the index in the REMAINING (clean) token list before which the
-    symbol should be re-inserted on decode.
+    Scans left-to-right with a regex. For each §-token found:
+      - Records (char_offset_in_clean_output, symbol)
+        where char_offset is the position in the clean output string
+        immediately before which the symbol appeared (after removing
+        the symbol and any adjacent extra whitespace).
+      - Removes the symbol from the output.
+
+    Surrounding whitespace handling:
+      - If symbol is preceded and followed by spaces: collapse to one space.
+      - If symbol is at start/end: remove adjacent space only.
 
     Returns
     -------
     clean_text : str
-        Whitespace-joined text with all § tokens removed.
+        Text with all § tokens removed and whitespace normalised.
     slot_map : List[Tuple[int, str]]
-        [(insertion_index, symbol), ...] in document order.
+        [(char_offset, symbol), ...] in document order, where
+        char_offset is the position in clean_text before which the
+        symbol should be re-inserted on decode.
     """
-    tokens = text.split(' ')
     slot_map: List[Tuple[int, str]] = []
-    clean_tokens: List[str] = []
+    # Build clean text and offset map simultaneously
+    result_chars: List[str] = []
+    i = 0
+    n = len(text)
 
-    for tok in tokens:
-        if _SYMBOL_RE.fullmatch(tok):
-            # insertion_index = where in clean_tokens this symbol goes
-            # (i.e. before the next clean token, = current length)
-            slot_map.append((len(clean_tokens), tok))
+    while i < n:
+        m = _SYMBOL_RE.match(text, i)
+        if m:
+            sym = m.group(0)
+            # char_offset in clean output = current length of result_chars
+            # but we want the offset AFTER any preceding space is kept
+            char_offset = len(result_chars)
+            # consume trailing space if present (we collapsed it)
+            j = m.end()
+            if j < n and text[j] == ' ' and char_offset > 0 and result_chars[-1] == ' ':
+                j += 1  # drop the extra space
+            slot_map.append((char_offset, sym))
+            i = j
         else:
-            clean_tokens.append(tok)
+            result_chars.append(text[i])
+            i += 1
 
-    return ' '.join(clean_tokens), slot_map
+    clean_text = ''.join(result_chars)
+    return clean_text, slot_map
 
 
-def inject_symbols(
-    roots: List[str],
+def splice_symbols(
+    joined: str,
     slot_map: List[Tuple[int, str]],
-) -> List[str]:
+    clean_text: str,
+) -> str:
     """
-    Re-insert § symbols into a decoded root list at their saved positions.
+    Re-insert § symbols into `joined` at positions corresponding to
+    their original offsets in `clean_text`.
 
-    slot_map entries are processed in reverse insertion-index order so
-    that earlier insertions don't shift the indices of later ones.
+    Maps each char_offset in clean_text to the equivalent position in
+    joined via linear scaling (robust to minor length drift from
+    _join_words punctuation collapsing).
+
+    Inserts in reverse offset order so earlier insertions don't shift
+    later ones.
 
     Parameters
     ----------
-    roots : List[str]
-        Decoded root word list (output of _split_roots).
+    joined : str
+        Final text produced by _join_words + capitalisation.
     slot_map : List[Tuple[int, str]]
-        [(insertion_index, symbol), ...] as produced by extract_symbols.
+        [(char_offset_in_clean, symbol), ...] from extract_symbols.
+    clean_text : str
+        The clean text passed to the encoder (used as reference for scaling).
 
     Returns
     -------
-    List[str] with § symbols re-inserted at the correct positions.
+    str with § symbols spliced in.
     """
-    if not slot_map:
-        return roots
+    if not slot_map or not clean_text:
+        return joined
 
-    result = list(roots)
-    # Insert from highest index to lowest so earlier indices stay valid
-    for ins_idx, sym in sorted(slot_map, key=lambda x: -x[0]):
-        ins_idx = min(ins_idx, len(result))  # clamp to end if list is short
-        result.insert(ins_idx, sym)
-    return result
+    clean_len  = len(clean_text)
+    joined_len = len(joined)
+    scale      = joined_len / clean_len if clean_len else 1.0
+
+    # Map char offsets to joined positions
+    mapped: List[Tuple[int, str]] = []
+    for clean_off, sym in slot_map:
+        j_pos = min(int(round(clean_off * scale)), joined_len)
+        # Snap to nearest space boundary for clean insertion
+        # Search left then right for a space within a small window
+        window = max(1, int(len(sym) * 2))
+        best   = j_pos
+        for delta in range(window + 1):
+            for sign in (-1, 1):
+                candidate = j_pos + sign * delta
+                if 0 <= candidate <= joined_len:
+                    if candidate == 0 or candidate == joined_len or joined[candidate - 1] == ' ' or (candidate < joined_len and joined[candidate] == ' '):
+                        best = candidate
+                        break
+            else:
+                continue
+            break
+        mapped.append((best, sym))
+
+    # Insert in reverse position order
+    result = list(joined)
+    for j_pos, sym in sorted(mapped, key=lambda x: -x[0]):
+        # Insert " sym " with smart space handling
+        pre  = result[j_pos - 1] if j_pos > 0 else ''
+        post = result[j_pos]     if j_pos < len(result) else ''
+        if pre == ' ' and post == ' ':
+            insert = list(sym)
+        elif pre == ' ' or pre == '':
+            insert = list(sym + ' ')
+        elif post == ' ' or post == '':
+            insert = list(' ' + sym)
+        else:
+            insert = list(' ' + sym + ' ')
+        result[j_pos:j_pos] = insert
+
+    return ''.join(result)
 
 
 # ---------------------------------------------------------------------------
-# Payload serialisation (shared by both approaches)
+# Payload serialisation
 # ---------------------------------------------------------------------------
 
 def pack_slot_map(slot_map: List[Tuple[int, str]]) -> List[List]:
-    """Serialise slot_map to a msgpack-friendly list of [index, symbol] pairs."""
-    return [[idx, sym] for idx, sym in slot_map]
+    """Serialise slot_map to a msgpack-friendly list."""
+    return [[off, sym] for off, sym in slot_map]
 
 
 def unpack_slot_map(packed: List[List]) -> List[Tuple[int, str]]:
@@ -143,13 +208,12 @@ def unpack_slot_map(packed: List[List]) -> List[Tuple[int, str]]:
 
 
 # ---------------------------------------------------------------------------
-# LEGACY: placeholder-based encode/decode (kept for compatibility)
+# LEGACY: placeholder-based encode/decode
 # ---------------------------------------------------------------------------
 
 def encode_slots_in_text(
     text: str,
 ) -> Tuple[str, List[Tuple[int, str]]]:
-    """Replace every §-prefixed token in `text` with zz{alpha(n)} placeholder."""
     slot_map: List[Tuple[int, str]] = []
     slot_idx = 0
 
@@ -165,11 +229,7 @@ def encode_slots_in_text(
     return result, slot_map
 
 
-def decode_slots_in_text(
-    text: str,
-    slot_map: List[Tuple[int, str]],
-) -> str:
-    """Restore zz{alpha} placeholders in text back to original § symbols."""
+def decode_slots_in_text(text: str, slot_map: List[Tuple[int, str]]) -> str:
     lookup: Dict[int, str] = {idx: sym for idx, sym in slot_map}
 
     def _replacer(m: re.Match) -> str:
@@ -179,10 +239,7 @@ def decode_slots_in_text(
     return _SLOT_RE.sub(_replacer, text)
 
 
-def encode_slots_in_roots(
-    roots: List[str],
-) -> Tuple[List[str], List[Tuple[int, str]]]:
-    """Replace §-prefixed entries in a root word list with zz{alpha(n)}."""
+def encode_slots_in_roots(roots: List[str]) -> Tuple[List[str], List[Tuple[int, str]]]:
     slot_map: List[Tuple[int, str]] = []
     new_roots: List[str] = []
     slot_idx = 0
@@ -196,11 +253,7 @@ def encode_slots_in_roots(
     return new_roots, slot_map
 
 
-def decode_slots_in_roots(
-    roots: List[str],
-    slot_map: List[Tuple[int, str]],
-) -> List[str]:
-    """Restore zz{alpha} entries in a decoded root list back to § symbols."""
+def decode_slots_in_roots(roots: List[str], slot_map: List[Tuple[int, str]]) -> List[str]:
     lookup: Dict[int, str] = {idx: sym for idx, sym in slot_map}
     result: List[str] = []
     for root in roots:

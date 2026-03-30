@@ -127,7 +127,7 @@ def _serialise_model(model: ContextMixingModel) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Sentinel stripping  (per-sentence, correct)
+# Sentinel stripping  (per-sentence)
 # ---------------------------------------------------------------------------
 
 def _sentinel_layout(lengths: List[int]) -> List[bool]:
@@ -186,12 +186,13 @@ def compress(
 
     symbol_table = merge_symbol_tables(entity_table, word_table)
 
-    # Stage 1c: EXTRACT all §-tokens from text before char encoding.
-    # Zero placeholder chars enter the char stream; positions saved in slot_map.
+    # Stage 1c: strip all §-tokens, record char offsets in clean text.
+    # The clean_text is what gets encoded; char offsets let us re-splice
+    # symbols into the final joined string after decoding.
     print("[Stage 1c] Extracting symbol slots...")
     clean_text, slot_map = extract_symbols(after_word_subs)
-    print(f"[Stage 1c] {len(slot_map)} symbols extracted from char stream.")
-    print(f"[Stage 1c] Text chars: {len(after_word_subs)} -> {len(clean_text)} "
+    print(f"[Stage 1c] {len(slot_map)} symbols extracted. "
+          f"Chars: {len(after_word_subs)} -> {len(clean_text)} "
           f"(saved {len(after_word_subs) - len(clean_text)} chars)")
 
     encoded_sentences, pos_freq_table = _encode_sentences(clean_text, model=model)
@@ -258,10 +259,13 @@ def compress(
 
     mc_data, mc_bits = pack_token_array(morph_codes_nested, 4)
 
+    # Store clean_text in payload so decompressor can use it as
+    # the scaling reference for char-offset splice.
     payload: Dict[str, Any] = {
         "lexis_variant":               "reconstructed",
         "symbol_table":                symbol_table,
         "slot_map":                    pack_slot_map(slot_map),
+        "slot_clean_text":             clean_text,
         "context_model_data":          model_bytes_compressed,
         "compressed_bitstream":        compressed_bytes,
         "pos_deltas_huffman_table":    huff_table_bytes,

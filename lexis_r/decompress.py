@@ -4,8 +4,6 @@ Reads a .lexisr file (zstd-wrapped msgpack), loads the serialised
 ContextMixingModel directly from the payload, then arithmetic-decodes
 the char stream back to text.
 
-Auto-detects zstd magic so old plain-msgpack .lexisr files still load.
-
 Usage
 -----
     from lexis_r.decompress import decompress
@@ -24,7 +22,7 @@ import msgpack
 
 from compression.alphabet.morph_codes import apply_morph
 from compression.alphabet.phonetic_map import PHONETIC_CLASSES
-from compression.pipeline.stage1c_symbol_slots import inject_symbols, unpack_slot_map
+from compression.pipeline.stage1c_symbol_slots import splice_symbols, unpack_slot_map
 from compression.pipeline.stage5_discourse_symbols import decode_symbols
 from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.stage9_autocorrect import autocorrect
@@ -125,7 +123,7 @@ def _build_encoded_sentences(
 
 
 # ---------------------------------------------------------------------------
-# Sentinel reconstruction  (per-sentence, correct)
+# Sentinel reconstruction
 # ---------------------------------------------------------------------------
 
 def _sentinel_layout(lengths: List[int]) -> List[bool]:
@@ -266,8 +264,9 @@ def decompress(input_path: str) -> str:
 
     payload: Dict[str, Any] = msgpack.unpackb(raw, raw=False, strict_map_key=False)
 
-    symbol_table: dict = payload.get("symbol_table", {})
-    slot_map = unpack_slot_map(payload.get("slot_map", []))
+    symbol_table: dict  = payload.get("symbol_table", {})
+    slot_map            = unpack_slot_map(payload.get("slot_map", []))
+    clean_text: str     = payload.get("slot_clean_text", "")
 
     print("[Decompress] Loading context model from payload...")
     context_model = _load_model(zlib.decompress(bytes(payload["context_model_data"])))
@@ -322,23 +321,20 @@ def decompress(input_path: str) -> str:
     )
     roots = _split_roots(char_stream)
 
-    # Stage 1c: re-inject § symbols at their saved word positions
-    # BEFORE apply_morph so morph codes align correctly with clean roots.
-    if slot_map:
-        roots = inject_symbols(roots, slot_map)
-
     mc_data, mc_bits   = payload["packed_morph_codes"]
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
     morph_codes_flat   = [c for sent in morph_codes_nested for c in sent]
 
-    # §-prefixed tokens: skip apply_morph (they are not inflectable roots)
     words = [
-        root if root.startswith("\u00a7") else
         apply_morph(root, morph_codes_flat[i] if i < len(morph_codes_flat) else 0)
         for i, root in enumerate(roots)
     ]
     result = _join_words(words)
     result = result[0].upper() + result[1:] if result else result
+
+    # Re-splice § symbols into the joined string at their original char offsets
+    if slot_map and clean_text:
+        result = splice_symbols(result, slot_map, clean_text)
 
     if symbol_table:
         result = decode_symbols(result, symbol_table)
