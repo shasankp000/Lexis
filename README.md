@@ -1,6 +1,6 @@
 # Lexis
 
-A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) (non-record track).
+A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf)
 
 Lexis achieves **2.7494 bpb on FineWeb with zero training data**, outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure — phonetic classification, morphological coding, syntactic tree encoding, coreference resolution, and online context adaptation.
 
