@@ -38,7 +38,6 @@ from lexis_r.payload import (
     POS_TO_IDX,
     pack_huffman_bits,
     pack_pos_freq_table,
-    pack_root_lengths,
     pack_token_array,
     pack_u8_list,
     pack_vlq_list,
@@ -145,19 +144,11 @@ def _strip_sentinel_deltas_per_sentence(
     pos_deltas_nested:   List[List[int]],
     root_lengths_nested: List[List[int]],
 ) -> Tuple[List[List[int]], List[int]]:
-    """Strip known sentinel deltas from each sentence independently.
-
-    Returns:
-        content_nested  : per-sentence content-only deltas
-        content_counts  : number of content deltas per sentence
-    """
     content_nested: List[List[int]] = []
     for s_idx, sent_deltas in enumerate(pos_deltas_nested):
         lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
         layout  = _sentinel_layout(lengths)
-        content = [
-            d for d, is_sent in zip(sent_deltas, layout) if not is_sent
-        ]
+        content = [d for d, is_sent in zip(sent_deltas, layout) if not is_sent]
         content_nested.append(content)
     content_counts = [len(c) for c in content_nested]
     return content_nested, content_counts
@@ -240,8 +231,17 @@ def compress(
     lz77_pos_bytes = pack_pos_tags_lz77(pos_tags_nested, POS_TO_IDX)
     print(f"[Stage 7] pos_tags: {lz77_n_tokens} tokens -> {len(lz77_pos_bytes)} bytes")
 
+    # root_lengths: Huffman over flat raw values (entropy=2.9 bpb, 17 unique)
+    # delta+zigzag+VLQ was storing at ~9.3 bits/value; raw Huffman wins decisively
+    rl_flat   = [l for sent in root_lengths_nested for l in sent]
+    rl_counts = [len(sent) for sent in root_lengths_nested]   # per-sentence token counts
+    rl_huff_table, rl_huff_stream = huffman.encode(rl_flat)
+    print(
+        f"[Stage 7] root_lengths: {len(rl_flat)} values -> "
+        f"{len(rl_huff_stream)} B huffman stream (+{len(rl_huff_table)} B table)"
+    )
+
     mc_data, mc_bits = pack_token_array(morph_codes_nested, 4)
-    rl_vlq           = pack_root_lengths(root_lengths_nested)
 
     payload: Dict[str, Any] = {
         "lexis_variant":               "reconstructed",
@@ -258,7 +258,10 @@ def compress(
         "packed_pos_huffman_bits":     pack_huffman_bits(pos_huffman_bits_list),
         "packed_pos_n_tags":           pack_u8_list(pos_n_tags_list),
         "packed_morph_codes":          (mc_data, mc_bits),
-        "packed_root_lengths_vlq":     rl_vlq,
+        "root_lengths_huffman_table":  rl_huff_table,
+        "root_lengths_huffman_stream": rl_huff_stream,
+        "root_lengths_total_count":    len(rl_flat),
+        "root_lengths_sent_counts":    pack_vlq_list(rl_counts),
         "packed_pos_freq_table":       pack_pos_freq_table(pos_freq_table),
         "num_symbols":                 len(char_classes),
     }

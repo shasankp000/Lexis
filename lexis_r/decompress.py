@@ -33,7 +33,6 @@ from lexis_r.lz77_pos import unpack_pos_tags_lz77
 from lexis_r.payload import (
     POS_VOCAB,
     unpack_huffman_bits,
-    unpack_root_lengths,
     unpack_token_array,
     unpack_u8_list,
     unpack_vlq_list,
@@ -58,20 +57,38 @@ def _load_model(model_bytes: bytes) -> ContextMixingModel:
 
 
 # ---------------------------------------------------------------------------
+# root_lengths reconstruction from Huffman stream
+# ---------------------------------------------------------------------------
+
+def _unpack_root_lengths_huffman(
+    huff_table: bytes,
+    huff_stream: bytes,
+    total_count: int,
+    sent_counts: List[int],
+) -> List[List[int]]:
+    flat = huffman.decode(huff_table, huff_stream, total_count)
+    nested: List[List[int]] = []
+    offset = 0
+    for count in sent_counts:
+        nested.append(flat[offset: offset + count])
+        offset += count
+    return nested
+
+
+# ---------------------------------------------------------------------------
 # encoded_sentences rebuilder
 # ---------------------------------------------------------------------------
 
-def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
+def _build_encoded_sentences(
+    payload: Dict[str, Any],
+    root_lengths_nested: List[List[int]],
+) -> List[Dict]:
     pos_n_tags      = unpack_u8_list(bytes(payload["packed_pos_n_tags"]))
     lz77_bytes      = bytes(payload["packed_pos_tags_lz77"])
     pos_tags_nested = unpack_pos_tags_lz77(lz77_bytes, pos_n_tags, POS_VOCAB)
 
     mc_data, mc_bits   = payload["packed_morph_codes"]
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
-
-    root_lengths_nested = unpack_root_lengths(
-        bytes(payload["packed_root_lengths_vlq"])
-    )
 
     pos_bits        = unpack_huffman_bits(bytes(payload["packed_pos_huffman_bits"]))
     pos_n_tags_list = unpack_u8_list(bytes(payload["packed_pos_n_tags"]))
@@ -111,14 +128,13 @@ def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def _sentinel_layout(lengths: List[int]) -> List[bool]:
-    """True = sentinel position, False = content char position."""
     layout: List[bool] = []
     for t_idx, length in enumerate(lengths):
-        layout.append(True)            # ^
+        layout.append(True)
         layout.extend([False] * length)
-        layout.append(True)            # $
+        layout.append(True)
         if t_idx < len(lengths) - 1:
-            layout.append(False)       # space separator
+            layout.append(False)
     return layout
 
 
@@ -126,30 +142,22 @@ def _reconstruct_sentinel_deltas_per_sentence(
     content_nested:      List[List[int]],
     root_lengths_nested: List[List[int]],
 ) -> List[List[int]]:
-    """Reinsert sentinel deltas into each sentence, resetting prev each time."""
     full_nested: List[List[int]] = []
-
     for s_idx, content in enumerate(content_nested):
         lengths      = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
         layout       = _sentinel_layout(lengths)
         content_iter = iter(content)
-        full:          List[int]      = []
-        prev_abs_pos: int | None      = None
+        full:          List[int] = []
+        prev_abs_pos: int | None = None
+        sent_count               = 0
 
         for is_sent in layout:
             if is_sent:
-                # sentinel: ^ is always abs=0, $ is always abs=1
-                target = 0 if (len(full) == 0 or
-                               (len(full) > 0 and full[-1] != (1 - (prev_abs_pos or 0) + (prev_abs_pos or 0))))\
-                           else 1
-                # Simpler: track whether we're at ^ or $
-                # ^ always comes before any content in a token: prev was None or prev was space
-                # $ always comes after content: prev was a content char
-                # Use the layout itself: first sentinel of each token pair = ^, second = $
-                target_abs = 0 if prev_abs_pos is None or _is_hat(layout, len(full)) else 1
+                target_abs = 0 if (sent_count % 2 == 0) else 1
                 delta = target_abs if prev_abs_pos is None else target_abs - prev_abs_pos
                 full.append(delta)
                 prev_abs_pos = target_abs
+                sent_count  += 1
             else:
                 delta = next(content_iter, 0)
                 prev_abs_pos = delta if prev_abs_pos is None else prev_abs_pos + delta
@@ -159,24 +167,11 @@ def _reconstruct_sentinel_deltas_per_sentence(
     return full_nested
 
 
-def _is_hat(layout: List[bool], current_pos: int) -> bool:
-    """Return True if the sentinel at current_pos is a ^ (not $)."""
-    # Walk layout to find which sentinel this is in its token pair
-    sent_count = 0
-    for i, is_sent in enumerate(layout):
-        if i == current_pos:
-            return (sent_count % 2) == 0
-        if is_sent:
-            sent_count += 1
-    return True
-
-
 # ---------------------------------------------------------------------------
 # Character stream reconstruction
 # ---------------------------------------------------------------------------
 
 def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
-    """Cumulative sum of deltas -> absolute positions. Resets per call."""
     if not deltas:
         return []
     values = [deltas[0]]
@@ -190,7 +185,6 @@ def _reconstruct_chars_per_sentence(
     pos_deltas_nested:    List[List[int]],
     sentence_char_counts: List[int],
 ) -> str:
-    """Reconstruct char stream, resetting the position counter per sentence."""
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     chars: List[str] = []
     cls_offset = 0
@@ -265,7 +259,6 @@ def _join_words(words: List[str]) -> str:
 def decompress(input_path: str) -> str:
     raw: bytes = Path(input_path).read_bytes()
 
-    # Auto-detect zstd wrapper
     if is_zstd(raw):
         print("[Decompress] Detected zstd wrapper, decompressing...")
         raw = decompress_payload(raw)
@@ -277,8 +270,17 @@ def decompress(input_path: str) -> str:
     print("[Decompress] Loading context model from payload...")
     context_model = _load_model(zlib.decompress(bytes(payload["context_model_data"])))
 
+    print("[Decompress] Decoding root_lengths from Huffman stream...")
+    rl_sent_counts      = unpack_vlq_list(bytes(payload["root_lengths_sent_counts"]))
+    root_lengths_nested = _unpack_root_lengths_huffman(
+        bytes(payload["root_lengths_huffman_table"]),
+        bytes(payload["root_lengths_huffman_stream"]),
+        int(payload["root_lengths_total_count"]),
+        rl_sent_counts,
+    )
+
     print("[Decompress] Rebuilding context stream from metadata...")
-    encoded_sentences = _build_encoded_sentences(payload)
+    encoded_sentences = _build_encoded_sentences(payload, root_lengths_nested)
 
     print("[Decompress] Arithmetic decoding char stream...")
     num_symbols  = int(payload["num_symbols"])
@@ -291,14 +293,13 @@ def decompress(input_path: str) -> str:
     )
 
     print("[Decompress] Huffman decoding pos_deltas...")
-    total_count = int(payload["pos_deltas_total_count"])
+    total_count  = int(payload["pos_deltas_total_count"])
     flat_content = huffman.decode(
         bytes(payload["pos_deltas_huffman_table"]),
         bytes(payload["pos_deltas_huffman_stream"]),
         total_count,
     )
 
-    # Split flat content back into per-sentence lists
     content_counts = unpack_vlq_list(bytes(payload["pos_deltas_content_counts"]))
     content_nested: List[List[int]] = []
     offset = 0
@@ -306,10 +307,6 @@ def decompress(input_path: str) -> str:
         content_nested.append(flat_content[offset: offset + count])
         offset += count
 
-    # Reinsert sentinel deltas per sentence
-    root_lengths_nested = unpack_root_lengths(
-        bytes(payload["packed_root_lengths_vlq"])
-    )
     pos_deltas_nested = _reconstruct_sentinel_deltas_per_sentence(
         content_nested, root_lengths_nested
     )
