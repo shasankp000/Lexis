@@ -108,7 +108,6 @@ def _load_fineweb(n_samples: int, max_chars: int, split: str, seed: int) -> list
         name="sample-10BT",
         split=split,
         streaming=True,
-        trust_remote_code=True,
     )
 
     rng = random.Random(seed)
@@ -297,10 +296,10 @@ def main() -> None:
         print("AGGREGATE RESULTS")
         print("=" * 65)
         print(f"  Samples evaluated          : {len(valid)}/{len(results)}")
-        print(f"  Avg bpb  (char-stream)     : {avg_bpb:.4f}  (±{std_bpb:.4f} std)")
+        print(f"  Avg bpb  (char-stream)     : {avg_bpb:.4f}  (\u00b1{std_bpb:.4f} std)")
         print(f"  Overall  (char-stream)     : {overall_bpb:.4f}  (pooled bytes)")
         print(f"  Min/Max  (char-stream)     : {min_bpb:.4f} / {max_bpb:.4f}")
-        print(f"  Avg bpb  (full payload)    : {avg_fp_bpb:.4f}  (±{std_fp_bpb:.4f} std)")
+        print(f"  Avg bpb  (full payload)    : {avg_fp_bpb:.4f}  (\u00b1{std_fp_bpb:.4f} std)")
         print(f"  Overall  (full payload)    : {overall_fp_bpb:.4f}  (pooled bytes)")
         print(f"  Min/Max  (full payload)    : {min_fp_bpb:.4f} / {max_fp_bpb:.4f}")
         print(f"  Total original             : {total_orig:,} bytes")
