@@ -132,6 +132,13 @@ def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
 def _reconstruct_chars_per_sentence(
     char_classes: List[int], pos_deltas_nested: List[List[int]], sentence_char_counts: List[int]
 ) -> str:
+    """Decode phonetic char stream. Returns only printable phonetic chars.
+
+    NOTE: ^ and $ sentinel markers are NOT present in the output — they
+    exist only in the encoder’s char_classes stream as structural markers
+    but have no PHONETIC_CLASSES entry. Token boundaries are recovered
+    via root_lengths_nested in _split_roots_by_lengths instead.
+    """
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     chars: List[str] = []
     cls_offset = 0
@@ -146,6 +153,31 @@ def _reconstruct_chars_per_sentence(
     return "".join(chars)
 
 
+def _split_roots_by_lengths(
+    char_stream: str,
+    root_lengths_nested: List[List[int]],
+) -> List[str]:
+    """Slice the phonetic char stream into roots using root_lengths as
+    ground-truth token boundaries.
+
+    This replaces the old _split_roots which relied on ^ / $ sentinel
+    chars in the stream. Those sentinels are silently dropped when their
+    (cls, pos) pair is absent from PHONETIC_CLASSES, causing root count
+    mismatches at 10k+ chars and cascading morph-code misalignment.
+
+    Each token contributes exactly root_lengths[sent][tok] phonetic chars
+    to the stream (sentinels ^ and $ are structural-only and not decoded).
+    """
+    roots: List[str] = []
+    offset = 0
+    for lengths in root_lengths_nested:
+        for length in lengths:
+            roots.append(char_stream[offset: offset + length])
+            offset += length
+    return roots
+
+
+# kept for backward compat / debugging
 def _split_roots(char_stream: str) -> List[str]:
     roots, current = [], []
     for ch in char_stream:
@@ -245,7 +277,10 @@ def decompress(input_path: str) -> str:
     pos_deltas_nested    = _reconstruct_sentinel_deltas_per_sentence(content_nested, root_lengths_nested)
     sentence_char_counts = unpack_vlq_list(bytes(payload["packed_sentence_char_counts"]))
     char_stream          = _reconstruct_chars_per_sentence(char_classes, pos_deltas_nested, sentence_char_counts)
-    roots                = _split_roots(char_stream)
+
+    # Use root_lengths as ground-truth token boundaries — do NOT use
+    # _split_roots which relies on ^ / $ markers that may be dropped.
+    roots = _split_roots_by_lengths(char_stream, root_lengths_nested)
 
     mc_data, mc_bits   = payload["packed_morph_codes"]
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
