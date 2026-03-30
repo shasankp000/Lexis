@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections import Counter
 from pathlib import Path
 from typing import Any, cast, Dict, List
 
@@ -32,10 +31,12 @@ from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.utils import chunk_text
 from lexis_r.arithmetic import ArithmeticEncoder
 from lexis_r import huffman
+from lexis_r.lz77_pos import pack_pos_tags_lz77
 from lexis_r.payload import (
+    POS_TO_IDX,
+    POS_VOCAB,
     pack_huffman_bits,
     pack_pos_freq_table,
-    pack_pos_tags,
     pack_root_lengths,
     pack_token_array,
     pack_u8_list,
@@ -137,32 +138,20 @@ def _is_sentinel_index(
     sentence_char_counts: List[int],
     root_lengths_nested: List[List[int]],
 ) -> bool:
-    """
-    Return True if global char index idx corresponds to a ^/$ marker.
-
-    We know the char stream layout per sentence:
-      for each token of length L:
-        ^ (1)  +  L chars  +  $ (1)  [+  _ space (1) if not last token]
-    Markers are at the ^ and $ positions.
-    """
     offset = 0
     for s_idx, count in enumerate(sentence_char_counts):
         if idx < offset + count:
-            local = idx - offset
+            local   = idx - offset
             lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
-            pos = 0
+            pos     = 0
             for t_idx, length in enumerate(lengths):
-                # ^ marker
                 if local == pos:
                     return True
                 pos += 1
-                # root chars
                 pos += length
-                # $ marker
                 if local == pos:
                     return True
                 pos += 1
-                # _ space (not after last token)
                 if t_idx < len(lengths) - 1:
                     pos += 1
             return False
@@ -175,14 +164,7 @@ def _strip_sentinel_deltas(
     sentence_char_counts: List[int],
     root_lengths_nested: List[List[int]],
 ) -> tuple[List[int], List[int]]:
-    """
-    Split pos_deltas into:
-      - content_deltas: only the non-sentinel positions
-      - sentinel_indices: global indices of sentinel positions (for reconstruction)
-
-    Returns (content_deltas, sentinel_indices).
-    """
-    content: List[int] = []
+    content:          List[int] = []
     sentinel_indices: List[int] = []
     for i, delta in enumerate(char_pos_deltas):
         if _is_sentinel_index(i, sentence_char_counts, root_lengths_nested):
@@ -245,7 +227,7 @@ def compress(
         morph_codes_nested.append(sent.get("morph_codes", []))
         root_lengths_nested.append([len(r) for r in sent.get("roots", [])])
 
-    # ─ Strip sentinel deltas (^/$) before encoding pos_deltas
+    # ─ Strip sentinel deltas
     print("[Stage 7] Stripping sentinel deltas...")
     content_deltas, sentinel_indices = _strip_sentinel_deltas(
         char_pos_deltas, sentence_char_counts, root_lengths_nested
@@ -262,8 +244,14 @@ def compress(
     print("[Stage 7] Huffman encoding pos_deltas...")
     huff_table_bytes, huff_bitstream = huffman.encode(content_deltas)
 
-    # ─ Pack structural metadata
-    pt_data, pt_bits = pack_pos_tags(pos_tags_nested)
+    # ─ LZ77 pointer encode POS tags (token-level, cross-sentence window)
+    print("[Stage 7] LZ77 encoding pos_tags...")
+    lz77_n_tokens   = sum(pos_n_tags_list)
+    lz77_pos_bytes  = pack_pos_tags_lz77(pos_tags_nested, POS_TO_IDX)
+    print(f"[Stage 7] pos_tags: {lz77_n_tokens} tokens → {len(lz77_pos_bytes)} bytes "
+          f"(was 876B with 5-bit packing)")
+
+    # ─ Pack remaining structural metadata
     mc_data, mc_bits = pack_token_array(morph_codes_nested, 4)
     rl_vlq           = pack_root_lengths(root_lengths_nested)
 
@@ -277,11 +265,13 @@ def compress(
         "pos_deltas_huffman_stream":   huff_bitstream,
         "pos_deltas_content_count":    len(content_deltas),
         "pos_deltas_total_count":      len(char_pos_deltas),
+        # pos_tags — LZ77 pointer encoded
+        "packed_pos_tags_lz77":        lz77_pos_bytes,
+        "pos_tags_token_count":        lz77_n_tokens,
         # structural metadata
         "packed_sentence_char_counts": pack_u8_list(sentence_char_counts),
         "packed_pos_huffman_bits":     pack_huffman_bits(pos_huffman_bits_list),
         "packed_pos_n_tags":           pack_u8_list(pos_n_tags_list),
-        "packed_pos_tags":             (pt_data, pt_bits),
         "packed_morph_codes":          (mc_data, mc_bits),
         "packed_root_lengths_vlq":     rl_vlq,
         "packed_pos_freq_table":       pack_pos_freq_table(pos_freq_table),
