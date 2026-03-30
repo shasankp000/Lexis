@@ -30,8 +30,8 @@ from lexis_r.lz77_pos import unpack_pos_tags_lz77
 from lexis_r.payload import (
     POS_VOCAB,
     unpack_huffman_bits,
+    unpack_morph_codes_rle,
     unpack_root_lengths,
-    unpack_token_array,
     unpack_u8_list,
 )
 
@@ -57,19 +57,19 @@ def _load_model(model_bytes: bytes) -> ContextMixingModel:
 # ---------------------------------------------------------------------------
 
 def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
-    # POS tags — LZ77 decoded
-    pos_n_tags       = unpack_u8_list(bytes(payload["packed_pos_n_tags"]))
-    lz77_bytes       = bytes(payload["packed_pos_tags_lz77"])
-    pos_tags_nested  = unpack_pos_tags_lz77(lz77_bytes, pos_n_tags, POS_VOCAB)
+    pos_n_tags      = unpack_u8_list(bytes(payload["packed_pos_n_tags"]))
+    lz77_bytes      = bytes(payload["packed_pos_tags_lz77"])
+    pos_tags_nested = unpack_pos_tags_lz77(lz77_bytes, pos_n_tags, POS_VOCAB)
 
-    mc_data, mc_bits   = payload["packed_morph_codes"]
-    morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
+    morph_codes_nested = unpack_morph_codes_rle(
+        bytes(payload["packed_morph_codes_rle"])
+    )
 
     root_lengths_nested = unpack_root_lengths(
         bytes(payload["packed_root_lengths_vlq"])
     )
 
-    pos_bits   = unpack_huffman_bits(bytes(payload["packed_pos_huffman_bits"]))
+    pos_bits        = unpack_huffman_bits(bytes(payload["packed_pos_huffman_bits"]))
     pos_n_tags_list = unpack_u8_list(bytes(payload["packed_pos_n_tags"]))
 
     encoded: List[Dict] = []
@@ -121,12 +121,12 @@ def _reconstruct_sentinel_deltas(
         sentinel_abs: List[int]  = []
 
         for t_idx, length in enumerate(lengths):
-            layout.append(True);  sentinel_abs.append(0)   # ^
+            layout.append(True);  sentinel_abs.append(0)
             for _ in range(length):
                 layout.append(False); sentinel_abs.append(-1)
-            layout.append(True);  sentinel_abs.append(1)   # $
+            layout.append(True);  sentinel_abs.append(1)
             if t_idx < len(lengths) - 1:
-                layout.append(False); sentinel_abs.append(-1)  # _
+                layout.append(False); sentinel_abs.append(-1)
 
         for is_sent, abs_pos_if_sent in zip(layout, sentinel_abs):
             if is_sent:
@@ -146,7 +146,7 @@ def _reconstruct_sentinel_deltas(
 
 
 # ---------------------------------------------------------------------------
-# Character stream reconstruction helpers
+# Character stream reconstruction
 # ---------------------------------------------------------------------------
 
 def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
@@ -285,9 +285,10 @@ def decompress(input_path: str) -> str:
     char_stream = _reconstruct_chars(char_classes, pos_deltas, sentence_char_counts)
     roots       = _split_roots(char_stream)
 
-    mc_data, mc_bits   = payload["packed_morph_codes"]
-    morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
-    morph_codes_flat   = [c for sent in morph_codes_nested for c in sent]
+    morph_codes_nested = unpack_morph_codes_rle(
+        bytes(payload["packed_morph_codes_rle"])
+    )
+    morph_codes_flat = [c for sent in morph_codes_nested for c in sent]
 
     words  = [
         apply_morph(root, morph_codes_flat[i] if i < len(morph_codes_flat) else 0)

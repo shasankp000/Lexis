@@ -34,11 +34,10 @@ from lexis_r import huffman
 from lexis_r.lz77_pos import pack_pos_tags_lz77
 from lexis_r.payload import (
     POS_TO_IDX,
-    POS_VOCAB,
     pack_huffman_bits,
+    pack_morph_codes_rle,
     pack_pos_freq_table,
     pack_root_lengths,
-    pack_token_array,
     pack_u8_list,
 )
 
@@ -49,10 +48,9 @@ except ImportError:
         return it
 
 
-# sentinel coordinates in the phonetic map
 _SENTINEL_COORDS = {
-    PHONETIC_CLASSES["^"],   # (6, 0) word-start
-    PHONETIC_CLASSES["$"],   # (6, 1) word-end
+    PHONETIC_CLASSES["^"],
+    PHONETIC_CLASSES["$"],
 }
 
 
@@ -183,10 +181,8 @@ def compress(
     output_path: str,
     model: str | None = None,
 ) -> Dict[str, Any]:
-    # ─ Stage 1: normalise
     normalized = normalize_text(text)
 
-    # ─ Stage 4+5: discourse
     print("[Stage 4+5] Running discourse analysis...")
     disc_analyser = DiscourseAnalyser(use_spacy=True)
     stage4_result = disc_analyser.analyse_document(normalized)
@@ -194,19 +190,16 @@ def compress(
     orig_len = len(normalized)
     disc_len = len(discourse_compressed)
     print(
-        f"[Stage 4+5] {orig_len} → {disc_len} chars "
+        f"[Stage 4+5] {orig_len} -> {disc_len} chars "
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    # ─ Stages 2–5: morphology + syntax + character encoding
     encoded_sentences, pos_freq_table = _encode_sentences(normalized, model=model)
 
-    # ─ Stage 6: train context model
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
     model_bytes = _serialise_model(context_model)
 
-    # ─ Gather per-sentence streams
     char_classes:          List[int]       = []
     char_pos_deltas:       List[int]       = []
     sentence_char_counts:  List[int]       = []
@@ -227,52 +220,46 @@ def compress(
         morph_codes_nested.append(sent.get("morph_codes", []))
         root_lengths_nested.append([len(r) for r in sent.get("roots", [])])
 
-    # ─ Strip sentinel deltas
     print("[Stage 7] Stripping sentinel deltas...")
     content_deltas, sentinel_indices = _strip_sentinel_deltas(
         char_pos_deltas, sentence_char_counts, root_lengths_nested
     )
-    print(f"[Stage 7] pos_deltas: {len(char_pos_deltas)} → {len(content_deltas)} "
+    print(f"[Stage 7] pos_deltas: {len(char_pos_deltas)} -> {len(content_deltas)} "
           f"(stripped {len(sentinel_indices)} sentinels)")
 
-    # ─ Stage 7: arithmetic encode char stream
     print("[Stage 7] Arithmetic encoding char stream...")
     enc              = ArithmeticEncoder()
     compressed_bytes = enc.encode(char_classes, context_model, encoded_sentences)
 
-    # ─ Zigzag + canonical Huffman encode stripped pos_deltas
     print("[Stage 7] Huffman encoding pos_deltas...")
     huff_table_bytes, huff_bitstream = huffman.encode(content_deltas)
 
-    # ─ LZ77 pointer encode POS tags (token-level, cross-sentence window)
     print("[Stage 7] LZ77 encoding pos_tags...")
-    lz77_n_tokens   = sum(pos_n_tags_list)
-    lz77_pos_bytes  = pack_pos_tags_lz77(pos_tags_nested, POS_TO_IDX)
-    print(f"[Stage 7] pos_tags: {lz77_n_tokens} tokens → {len(lz77_pos_bytes)} bytes "
-          f"(was 876B with 5-bit packing)")
+    lz77_n_tokens  = sum(pos_n_tags_list)
+    lz77_pos_bytes = pack_pos_tags_lz77(pos_tags_nested, POS_TO_IDX)
+    print(f"[Stage 7] pos_tags: {lz77_n_tokens} tokens -> {len(lz77_pos_bytes)} bytes")
 
-    # ─ Pack remaining structural metadata
-    mc_data, mc_bits = pack_token_array(morph_codes_nested, 4)
-    rl_vlq           = pack_root_lengths(root_lengths_nested)
+    print("[Stage 7] RLE encoding morph_codes...")
+    mc_rle = pack_morph_codes_rle(morph_codes_nested)
+    print(f"[Stage 7] morph_codes: {sum(len(s) for s in morph_codes_nested)} tokens -> {len(mc_rle)} bytes")
+
+    rl_vlq = pack_root_lengths(root_lengths_nested)
 
     payload: Dict[str, Any] = {
         "lexis_variant":               "reconstructed",
         "symbol_table":                symbol_table,
         "context_model_data":          model_bytes,
         "compressed_bitstream":        compressed_bytes,
-        # pos_deltas — sentinel-stripped, zigzag+Huffman coded
         "pos_deltas_huffman_table":    huff_table_bytes,
         "pos_deltas_huffman_stream":   huff_bitstream,
         "pos_deltas_content_count":    len(content_deltas),
         "pos_deltas_total_count":      len(char_pos_deltas),
-        # pos_tags — LZ77 pointer encoded
         "packed_pos_tags_lz77":        lz77_pos_bytes,
         "pos_tags_token_count":        lz77_n_tokens,
-        # structural metadata
         "packed_sentence_char_counts": pack_u8_list(sentence_char_counts),
         "packed_pos_huffman_bits":     pack_huffman_bits(pos_huffman_bits_list),
         "packed_pos_n_tags":           pack_u8_list(pos_n_tags_list),
-        "packed_morph_codes":          (mc_data, mc_bits),
+        "packed_morph_codes_rle":      mc_rle,
         "packed_root_lengths_vlq":     rl_vlq,
         "packed_pos_freq_table":       pack_pos_freq_table(pos_freq_table),
         "num_symbols":                 len(char_classes),

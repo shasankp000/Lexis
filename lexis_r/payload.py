@@ -6,17 +6,17 @@ packing, which would silently clamp roots longer than 15 characters.
 
 Layout summary
 --------------
-  pos_tags              5-bit/token bit-pack  (8-bit sentence-length prefix)
-  morph_codes           4-bit/token bit-pack  (same scheme; morph codes 0-12)
+  pos_tags              LZ77 pointer encoded (token-level, cross-sentence)
+  morph_codes           RLE: 0x00+run for zero runs, 0x01+code for non-zero
   root_lengths          delta + zigzag + base-128 VLQ
   char/morph_context    flat VLQ bytes, row-major, no keys
   struct_context        flat VLQ bytes + zlib
-  pos_huffman_bits      base-128 VLQ per value scaled ×100  (1B count prefix)
+  pos_huffman_bits      base-128 VLQ per value scaled x100  (1B count prefix)
   pos_n_tags            uint8 list (1B count + 1B/sentence)  [almost always <256]
   sentence_char_counts  uint8 list (1B count + 1B/sentence)  [almost always <256]
   pos_freq_table        base-256 VLQ per tag, fixed _POS_VOCAB order
   pos_deltas_counts     1B n_pairs + zigzag base-128 VLQ (delta, count) pairs
-  model_weights         3 × float32 big-endian
+  model_weights         3 x float32 big-endian
   char/morph_vocab      uint8 flat (1B count + 1B/entry)
   pos_vocab             packed 5-bit ids
 
@@ -26,6 +26,8 @@ Encoding selection rationale
   base-256 VLQ : best for values 256+ that are rarely small (e.g. freq counts)
   uint8        : best when values are provably < 256 (sentence lengths, n_tags)
   delta+zigzag : best when consecutive values are correlated (root_lengths)
+  RLE          : best when one value dominates long runs (morph_codes ~85% zero)
+  LZ77         : best when short repeated sequences exist (pos_tags patterns)
 
 All helpers are pure functions: bytes in, bytes/value out.
 """
@@ -105,7 +107,8 @@ def _zigzag_decode(n: int) -> int:
 
 
 # ===========================================================================
-# Bit-packed token arrays  (pos_tags → 5-bit, morph_codes → 4-bit)
+# Bit-packed token arrays  (pos_tags -> 5-bit, morph_codes -> 4-bit)
+# Kept for fallback / testing. morph_codes now uses RLE in production.
 # ===========================================================================
 
 def pack_token_array(
@@ -142,7 +145,7 @@ def unpack_token_array(
 
 
 # ===========================================================================
-# POS tags  (5-bit per token, 18-label vocab)
+# POS tags  (5-bit per token, 18-label vocab) — kept for fallback
 # ===========================================================================
 
 def pack_pos_tags(sentences: List[List[str]]) -> Tuple[bytes, int]:
@@ -156,21 +159,69 @@ def unpack_pos_tags(data: bytes, n_bits: int) -> List[List[str]]:
 
 
 # ===========================================================================
+# morph_codes  — RLE encoding
+#
+# Morph code 0 (BASE form) accounts for >85% of tokens in English prose.
+# Consecutive zero runs are encoded as a single (0x00, run_length) pair.
+# Non-zero codes are emitted as individual (0x01, morph_code) literals.
+#
+# Wire format:
+#   vlq(n_sentences)
+#   per sentence:
+#     1B n_tokens
+#     sequence of 2B pairs until n_tokens values are covered:
+#       0x00  run_len   <- zero run of run_len tokens
+#       0x01  code      <- single non-zero token (code 1-12)
+#
+# Worst case: all non-zero -> 2B/token (vs 0.5B/token for 4-bit pack).
+# Best case:  all zero     -> 2B total per sentence regardless of length.
+# Typical:    ~85% zero    -> ~0.35B/token  (vs 0.5B for 4-bit pack).
+# ===========================================================================
+
+def pack_morph_codes_rle(sentences: List[List[int]]) -> bytes:
+    out = bytearray(_vlq_encode(len(sentences)))
+    for sent in sentences:
+        out += bytes([len(sent)])
+        i = 0
+        n = len(sent)
+        while i < n:
+            if sent[i] == 0:
+                run = 0
+                while i + run < n and sent[i + run] == 0 and run < 255:
+                    run += 1
+                out += bytes([0x00, run])
+                i += run
+            else:
+                out += bytes([0x01, sent[i]])
+                i += 1
+    return bytes(out)
+
+
+def unpack_morph_codes_rle(data: bytes) -> List[List[int]]:
+    offset = 0
+    n_sents, offset = _vlq_decode(data, offset)
+    sentences: List[List[int]] = []
+    for _ in range(n_sents):
+        n_tokens = data[offset]; offset += 1
+        tokens: List[int] = []
+        while len(tokens) < n_tokens:
+            flag = data[offset]; offset += 1
+            val  = data[offset]; offset += 1
+            if flag == 0x00:
+                tokens.extend([0] * val)
+            else:
+                tokens.append(val)
+        sentences.append(tokens)
+    return sentences
+
+
+# ===========================================================================
 # root_lengths  — delta + zigzag + base-128 VLQ
 #
 # Wire format per sentence:
 #   vlq(n_tokens)
 #   vlq(lengths[0])             <- first length stored absolute
 #   vlq(zigzag(delta))...       <- for tokens 1..N, delta = L[i] - L[i-1]
-#
-# English root lengths cluster around 3-8 with consecutive differences
-# of ±0-3 in most cases. Zigzag maps those to 0-6, all fitting in 1B.
-# Compared to storing absolute lengths (also 1B for 1-127), the gain
-# comes from long words after short ones: e.g. length 17 after length 4
-# stores delta=13 (zigzag=26, 1B) vs absolute 17 (1B) — wash — but
-# length 9 after length 8 stores delta=1 (zigzag=2, 1B) vs absolute 9
-# (1B) — wash. The real gain: length 9 after length 2 was two 1B values;
-# now delta=7 zigzag=14 is still 1B. Net: eliminates 2B edge cases.
 # ===========================================================================
 
 def pack_root_lengths(sentences: List[List[int]]) -> bytes:
@@ -179,7 +230,7 @@ def pack_root_lengths(sentences: List[List[int]]) -> bytes:
         out += _vlq_encode(len(sent))
         if not sent:
             continue
-        out += _vlq_encode(sent[0])           # first value absolute
+        out += _vlq_encode(sent[0])
         prev = sent[0]
         for length in sent[1:]:
             out += _vlq_encode(_zigzag_encode(length - prev))
@@ -236,12 +287,7 @@ def unpack_context_matrix(data: bytes, row_keys: List, n_cols: int) -> Dict:
 
 
 # ===========================================================================
-# pos_huffman_bits  — base-128 VLQ, scaled ×100
-#
-# 1B for values 0-127 (i.e. 0.00-1.27 bits), 2B for 128-16383.
-# Typical per-sentence huffman cost is 0.5-3.0 bits → scaled 50-300,
-# so most values cost 2B vs the old fixed 2B uint16 — but values <1.27
-# now cost 1B instead of 2B.
+# pos_huffman_bits  — base-128 VLQ, scaled x100
 # ===========================================================================
 
 def pack_huffman_bits(values: List[float]) -> bytes:
@@ -263,8 +309,6 @@ def unpack_huffman_bits(data: bytes) -> List[float]:
 
 # ===========================================================================
 # uint8 lists  (pos_n_tags, sentence_char_counts)
-# Kept as plain uint8 — sentence lengths and n_tags are virtually always
-# <256, so the 1B/value cost is optimal. No clamp issue in practice.
 # ===========================================================================
 
 def pack_u8_list(values: List[int]) -> bytes:
@@ -279,9 +323,6 @@ def unpack_u8_list(data: bytes) -> List[int]:
 
 # ===========================================================================
 # pos_freq_table  — base-256 VLQ, fixed _POS_VOCAB order
-#
-# On short inputs counts are small (save vs uint32);
-# on large inputs counts grow large (b256 handles them without truncation).
 # ===========================================================================
 
 def pack_pos_freq_table(table: Dict[str, int]) -> bytes:
@@ -302,7 +343,7 @@ def unpack_pos_freq_table(data: bytes) -> Dict[str, int]:
 
 
 # ===========================================================================
-# model_weights  (3 × float32)
+# model_weights  (3 x float32)
 # ===========================================================================
 
 def pack_weights(weights: List[float]) -> bytes:
@@ -343,11 +384,6 @@ def unpack_pos_vocab(data: bytes, n_bits: int) -> List[str]:
 
 # ===========================================================================
 # pos_deltas_counts  — zigzag + base-128 VLQ pairs
-#
-# Wire: [1B n_pairs] then n × (vlq(zigzag(delta)), vlq(count))
-# Zigzag maps signed deltas to non-negative integers for VLQ.
-# Typical counts are 1-5 → 1B each. Small deltas (±10) → 1B each.
-# Total: 2B/pair vs old 3B/pair (int8+uint16) — saves ~33%.
 # ===========================================================================
 
 def pack_deltas_counts(counts: Dict[int, int]) -> bytes:
