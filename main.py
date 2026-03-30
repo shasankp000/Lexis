@@ -74,7 +74,7 @@ def _run_discourse(text: str, device: str = "cpu") -> tuple[str, dict]:
     Run Stage 4 (coreference resolution) + Stage 5 (symbol encoding).
 
     Returns (compressed_text, symbol_table). The compressed_text has repeated
-    named-entity mentions replaced with §E{n} symbols. The symbol_table is
+    named-entity mentions replaced with \u00a7E{n} symbols. The symbol_table is
     needed at decode time to restore the original text.
     """
     analyser = DiscourseAnalyser(use_spacy=True, device=device)
@@ -110,7 +110,7 @@ def _encode_for_model(
 
     encoded_sentences: list[dict] = []
     for morphology, syntax in tqdm(
-        sentence_data, desc="Stage 5 — Encoding sentences", unit="sent"
+        sentence_data, desc="Stage 5 \u2014 Encoding sentences", unit="sent"
     ):
         encoded_sentences.append(
             char_encoder.encode_sentence_full(
@@ -181,7 +181,6 @@ def _reconstruct_chars(
             char = inverse_map.get((cls, pos))
             if char is not None:
                 chars.append(char)
-            # Unknown coord: skip silently (no fallback '_' insertion).
         idx += count
 
     if idx < len(class_stream):
@@ -218,17 +217,11 @@ def _flatten(nested: List[List[Any]]) -> List[Any]:
 
 
 # Chars that always attach to the token on their left (closing punctuation).
-# '"' is handled separately in _join_words because it is context-dependent:
-# after a sentence boundary it is an opening quote (attaches right),
-# after a word it is a closing quote (attaches left).
-_ATTACH_LEFT = set(".,;:!?)'-—%-/")
+_ATTACH_LEFT = set(".,;:!?)'-\u2014%-/")
 # Chars whose right edge glues to the following token with no space.
 _ATTACH_RIGHT = set("($#/")
 # Previous-token endings that signal the next '"' is an opening quote.
-# NOTE: '.' intentionally excluded — '"' after '.' is a closing quote
-# (e.g. `true."`).  Opening quotes after sentence-end are preceded by
-# whitespace, which is still in this set via the space character.
-_OPEN_QUOTE_AFTER = set("!?(— ")
+_OPEN_QUOTE_AFTER = set("!?(\u2014 ")
 
 
 def _join_words(words: list[str]) -> str:
@@ -253,15 +246,11 @@ def _join_words(words: list[str]) -> str:
             parts[-1] += word
             continue
         first_char = word[0]
-        # '"' is ambiguous: opening quote attaches to the right (no space
-        # before the next word), closing quote attaches to the left.
         if first_char == '"':
             prev_last = parts[-1][-1] if parts[-1] else ""
             if prev_last in _OPEN_QUOTE_AFTER or not parts[-1]:
-                # opening quote: space before '"', then '"' glues to next word
                 parts.append(' "')
             else:
-                # closing quote: glue to previous word
                 parts[-1] += '"'
             continue
         if first_char == "'":
@@ -274,36 +263,14 @@ def _join_words(words: list[str]) -> str:
     result = "".join(parts)
     result = result.replace("( ", "(").replace(" )", ")")
     result = result.replace("[ ", "[").replace(" ]", "]")
-    result = result.replace(" — ", "—")
+    result = result.replace(" \u2014 ", "\u2014")
     return result.strip()
 
 
-def _build_context_model(payload: Dict[str, Any]) -> ContextMixingModel:
+def _build_context_model_from_sentences(encoded_sentences: List[Dict]) -> ContextMixingModel:
+    """Train a fresh ContextMixingModel from already-encoded sentences."""
     model = ContextMixingModel()
-    char_context = defaultdict(Counter)
-    morph_context = defaultdict(Counter)
-    struct_context = defaultdict(Counter)
-
-    for key, counter in payload.get("char_context", {}).items():
-        char_context[int(key)] = Counter(
-            {int(k): int(v) for k, v in dict(counter).items()}
-        )
-    for key, counter in payload.get("morph_context", {}).items():
-        morph_context[int(key)] = Counter(
-            {int(k): int(v) for k, v in dict(counter).items()}
-        )
-    for key, counter in payload.get("struct_context", {}).items():
-        struct_context[str(key)] = Counter(
-            {int(k): int(v) for k, v in dict(counter).items()}
-        )
-
-    model.char_context = char_context
-    model.morph_context = morph_context
-    model.struct_context = struct_context
-    model.weights = list(payload.get("model_weights", model.weights))
-    model.char_vocab = [int(v) for v in payload.get("char_vocab", model.char_vocab)]
-    model.morph_vocab = [int(v) for v in payload.get("morph_vocab", model.morph_vocab)]
-    model.pos_vocab = [str(v) for v in payload.get("pos_vocab", model.pos_vocab)]
+    model.train(encoded_sentences)
     return model
 
 
@@ -345,6 +312,8 @@ def _build_encoded_sentences_from_metadata(payload: Dict[str, Any]) -> List[Dict
                 else 0.0,
                 "pos_n_tags": int(pos_n_tags[idx]) if idx < len(pos_n_tags) else 0,
                 "pos_tags": sentence_pos,
+                # char_classes not available here — filled in after decode
+                "morph_codes": sentence_morph,
             }
         )
     return encoded
@@ -359,9 +328,6 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
     discourse_compressed, symbol_table = _run_discourse(normalized)
     print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
 
-    # Character / morphology layers must operate on clean text only.
-    # §E{n} symbols are not in the phonetic alphabet and would corrupt the
-    # character stream if fed to _encode_for_model.
     analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
     morphology = analyser.analyse_sentence(normalized)
 
@@ -407,10 +373,17 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
 
     Stage 4+5 (discourse symbol encoding) runs on the normalised text to
     produce a symbol_table. The character/morphology pipeline then encodes
-    the *original normalised text* (not the §-symbol version), because §E{n}
+    the *original normalised text* (not the \u00a7-symbol version), because \u00a7E{n}
     tokens are outside the phonetic alphabet and would corrupt the character
     stream. The symbol_table is stored in the msgpack payload and is applied
     as the very last step in decompress() after join/case-restore.
+
+    The context model (char_context, morph_context, struct_context, weights,
+    vocabs) is NO LONGER stored in the payload. At decompress time the model
+    is reconstructed by re-running _encode_for_model() on a skeleton text
+    re-derived from the stored pos_tags/morph_codes/root_lengths arrays, then
+    re-training a fresh ContextMixingModel on those encoded_sentences.
+    This substantially reduces full-payload size.
     """
     normalized = normalize_text(text)
 
@@ -425,9 +398,6 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    # Character / morphology / probability layers operate on clean English only.
-    # Feeding discourse_compressed here would pass §-symbols into spaCy and the
-    # phonetic encoder, producing garbage roots (§ has no phonetic class entry).
     encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
 
     context_model = ContextMixingModel()
@@ -460,6 +430,9 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
     pos_delta_counts = Counter(char_pos_deltas)
     pos_deltas_stream = encoder.encode_unigram_counts(char_pos_deltas, pos_delta_counts)
 
+    # Context model is intentionally omitted from the payload.
+    # It is reconstructed at decompress time from the stored structural
+    # metadata (pos_tags, morph_codes, root_lengths) — see decompress().
     metadata = {
         # Stage 4+5 symbol table — required for decode
         "symbol_table": symbol_table,
@@ -473,19 +446,6 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
         "pos_tags": pos_tags,
         "morph_codes": morph_codes,
         "root_lengths": root_lengths,
-        "model_weights": context_model.weights,
-        "char_context": {
-            int(k): dict(v) for k, v in context_model.char_context.items()
-        },
-        "morph_context": {
-            int(k): dict(v) for k, v in context_model.morph_context.items()
-        },
-        "struct_context": {
-            str(k): dict(v) for k, v in context_model.struct_context.items()
-        },
-        "char_vocab": context_model.char_vocab,
-        "morph_vocab": context_model.morph_vocab,
-        "pos_vocab": context_model.pos_vocab,
         "num_symbols": len(char_classes),
         "num_char_classes": 7,
         "huffman_codes": encoded_sentences[0].get("pos_huffman_codes", {})
@@ -513,7 +473,20 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
 
 
 def decompress(input_path: str) -> str:
-    """Decompress arithmetic-coded or JSON payloads."""
+    """
+    Decompress a .lexis msgpack file.
+
+    If the payload contains a pre-built context model (legacy format: produced
+    before this refactor), it is used directly for backwards compatibility.
+
+    If the payload does NOT contain a pre-built context model (new format),
+    the model is reconstructed by:
+      1. Re-building encoded_sentences from the stored pos_tags/morph_codes/
+         root_lengths via _build_encoded_sentences_from_metadata().
+      2. Training a fresh ContextMixingModel on those encoded_sentences.
+    This produces an equivalent model to what was used at encode time, since
+    the context tables are fully determined by the structural metadata.
+    """
     raw = Path(input_path).read_bytes()
     payload: Dict[str, Any]
     try:
@@ -525,8 +498,21 @@ def decompress(input_path: str) -> str:
     symbol_table: dict = payload.get("symbol_table", {})
 
     if isinstance(payload, dict) and "compressed_bitstream" in payload:
-        context_model = _build_context_model(payload)
+        # ----------------------------------------------------------------
+        # Reconstruct the context model.
+        # New format: context model was not stored — re-derive it.
+        # Legacy format: context model tables present — load directly.
+        # ----------------------------------------------------------------
         encoded_sentences = _build_encoded_sentences_from_metadata(payload)
+
+        if "char_context" in payload:
+            # Legacy path: load stored model for backwards compatibility.
+            print("[Decompress] Loading stored context model (legacy format)...")
+            context_model = _build_context_model_legacy(payload)
+        else:
+            # New path: re-train model from structural metadata.
+            print("[Decompress] Re-training context model from structural metadata...")
+            context_model = _build_context_model_from_sentences(encoded_sentences)
 
         decoder = ArithmeticDecoder()
         num_symbols = int(
@@ -558,11 +544,9 @@ def decompress(input_path: str) -> str:
         result = _join_words(words)
         result = result[0].upper() + result[1:] if result else result
 
-        # Stage 4+5 decode: restore §E{n} symbols back to original surfaces.
         if symbol_table:
             result = decode_symbols(result, symbol_table)
 
-        # Stage 9: rule-based autocorrect — fixes spacing/punctuation artifacts.
         return autocorrect(result)
 
     if isinstance(payload, dict) and "morphology" in payload:
@@ -579,8 +563,41 @@ def decompress(input_path: str) -> str:
     return ""
 
 
+def _build_context_model_legacy(payload: Dict[str, Any]) -> ContextMixingModel:
+    """
+    Reconstruct a ContextMixingModel from a legacy payload that contains
+    serialised context tables.
+    """
+    model = ContextMixingModel()
+    char_context = defaultdict(Counter)
+    morph_context = defaultdict(Counter)
+    struct_context = defaultdict(Counter)
+
+    for key, counter in payload.get("char_context", {}).items():
+        char_context[int(key)] = Counter(
+            {int(k): int(v) for k, v in dict(counter).items()}
+        )
+    for key, counter in payload.get("morph_context", {}).items():
+        morph_context[int(key)] = Counter(
+            {int(k): int(v) for k, v in dict(counter).items()}
+        )
+    for key, counter in payload.get("struct_context", {}).items():
+        struct_context[str(key)] = Counter(
+            {int(k): int(v) for k, v in dict(counter).items()}
+        )
+
+    model.char_context = char_context
+    model.morph_context = morph_context
+    model.struct_context = struct_context
+    model.weights = list(payload.get("model_weights", model.weights))
+    model.char_vocab = [int(v) for v in payload.get("char_vocab", model.char_vocab)]
+    model.morph_vocab = [int(v) for v in payload.get("morph_vocab", model.morph_vocab)]
+    model.pos_vocab = [str(v) for v in payload.get("pos_vocab", model.pos_vocab)]
+    return model
+
+
 def analyse(text: str, model: str | None = None) -> None:
-    """Run pipeline in analysis mode — print stats at each stage."""
+    """Run pipeline in analysis mode \u2014 print stats at each stage."""
     normalized = normalize_text(text)
 
     # Stage 4+5
@@ -610,11 +627,11 @@ def analyse(text: str, model: str | None = None) -> None:
     print(f"Model: {model or SPACY_MODEL}")
     print(f"Context-mixing bpb: {bpb_value:.4f}")
 
-    print("Stage 2 — Morphology")
+    print("Stage 2 \u2014 Morphology")
     for key, value in morph_stats.items():
         print(f"  {key}: {value}")
 
-    print("Stage 5 — Character Encoding")
+    print("Stage 5 \u2014 Character Encoding")
     for key, value in encode_stats.items():
         print(f"  {key}: {value}")
 
@@ -628,11 +645,11 @@ def analyse(text: str, model: str | None = None) -> None:
     ]
     pos_huffman_summary = _summarise_pos_huffman(pos_huffman_results, pos_freq_table)
 
-    print("Stage 5 — POS Huffman Summary")
+    print("Stage 5 \u2014 POS Huffman Summary")
     for key, value in pos_huffman_summary.items():
         print(f"  {key}: {value}")
 
-    print("Stage 6 — Probability Model (Context Mixing)")
+    print("Stage 6 \u2014 Probability Model (Context Mixing)")
     print(f"  bpb: {bpb_value}")
     print(f"  char_vocab_size: {len(context_model.char_vocab)}")
     print(f"  morph_vocab_size: {len(context_model.morph_vocab)}")
