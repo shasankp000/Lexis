@@ -25,6 +25,10 @@ from compression.alphabet.phonetic_map import PHONETIC_CLASSES
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
 from compression.pipeline.stage1_normalize import normalize_text
 from compression.pipeline.stage1b_word_subs import encode_word_subs, merge_symbol_tables
+from compression.pipeline.stage1c_symbol_slots import (
+    encode_slots_in_text,
+    pack_slot_map,
+)
 from compression.pipeline.stage2_morphology import MorphologicalAnalyser
 from compression.pipeline.stage3_syntax import analyse_sentence
 from compression.pipeline.stage4_discourse import DiscourseAnalyser
@@ -104,7 +108,7 @@ def _encode_sentences(
 
     encoded: list[dict] = []
     for morphology, syntax in tqdm(
-        sentence_data, desc="Stage 5 \u2014 encoding", unit="sent"
+        sentence_data, desc="Stage 5 — encoding", unit="sent"
     ):
         encoded.append(
             char_encoder.encode_sentence_full(
@@ -167,8 +171,6 @@ def compress(
     normalized = normalize_text(text)
 
     # Stage 4+5: entity/discourse encoding FIRST on clean normalized text.
-    # Entity span offsets are computed against the original text, so word
-    # substitution must NOT have run yet or offsets will be wrong.
     print("[Stage 4+5] Running discourse analysis...")
     disc_analyser = DiscourseAnalyser(use_spacy=True)
     stage4_result = disc_analyser.analyse_document(normalized)
@@ -181,8 +183,6 @@ def compress(
     )
 
     # Stage 1b: word substitution AFTER entity encoding.
-    # Now §E tokens are already fixed in place; word subs operate on the
-    # entity-compressed text and cannot clobber entity span positions.
     print("[Stage 1b] Frequency-based word substitution...")
     after_word_subs, word_table = encode_word_subs(discourse_compressed)
     if word_table:
@@ -192,10 +192,15 @@ def compress(
         print("[Stage 1b] No words met frequency threshold.")
 
     # Merged symbol table: both §E and §W entries go into the payload.
-    # decode_symbols restores all of them transparently.
     symbol_table = merge_symbol_tables(entity_table, word_table)
 
-    encoded_sentences, pos_freq_table = _encode_sentences(after_word_subs, model=model)
+    # Stage 1c: replace all remaining § tokens with ZSLOT{n} placeholders
+    # so they survive the phonetic char encoder intact.
+    print("[Stage 1c] Encoding symbol slots...")
+    slotted_text, slot_map = encode_slots_in_text(after_word_subs)
+    print(f"[Stage 1c] {len(slot_map)} symbol slots created.")
+
+    encoded_sentences, pos_freq_table = _encode_sentences(slotted_text, model=model)
 
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
@@ -227,7 +232,6 @@ def compress(
         morph_codes_nested.append(sent.get("morph_codes", []))
         root_lengths_nested.append([len(r) for r in sent.get("roots", [])])
 
-    # Strip sentinel deltas per sentence, then flatten for Huffman
     print("[Stage 7] Stripping sentinel deltas (per-sentence)...")
     content_nested, content_counts = _strip_sentinel_deltas_per_sentence(
         pos_deltas_nested, root_lengths_nested
@@ -263,6 +267,7 @@ def compress(
     payload: Dict[str, Any] = {
         "lexis_variant":               "reconstructed",
         "symbol_table":                symbol_table,
+        "slot_map":                    pack_slot_map(slot_map),
         "context_model_data":          model_bytes_compressed,
         "compressed_bitstream":        compressed_bytes,
         "pos_deltas_huffman_table":    huff_table_bytes,
