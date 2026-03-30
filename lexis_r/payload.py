@@ -11,7 +11,7 @@ Layout summary
   root_lengths          delta + zigzag + base-128 VLQ
   char/morph_context    flat VLQ bytes, row-major, no keys
   struct_context        flat VLQ bytes + zlib
-  pos_huffman_bits      delta + zigzag + base-128 VLQ, scaled x100  (1B count prefix)
+  pos_huffman_bits      uint8 list  (1B count + 1B/sentence, values already integers)
   pos_n_tags            uint8 list (1B count + 1B/sentence)
   sentence_char_counts  uint8 list (1B count + 1B/sentence)
   pos_freq_table        base-256 VLQ per tag, fixed _POS_VOCAB order
@@ -24,9 +24,9 @@ Encoding selection rationale
 -----------------------------
   base-128 VLQ : best for values with unbounded range; costs 1B for 0-127
   base-256 VLQ : best for values 256+ that are rarely small (e.g. freq counts)
-  uint8        : best when values are provably < 256 (sentence lengths, n_tags)
-  delta+zigzag : best when consecutive values are correlated (root_lengths,
-                 pos_huffman_bits)
+  uint8        : best when values are provably < 256 (sentence lengths, n_tags,
+                 pos_huffman_bits which are integer costs < 256)
+  delta+zigzag : best when consecutive values are correlated (root_lengths)
   RLE          : best for any repeated-value runs
   LZ77         : best when short repeated sequences exist (pos_tags patterns)
 
@@ -159,8 +159,8 @@ def unpack_pos_tags(data: bytes, n_bits: int) -> List[List[str]]:
 
 
 # ===========================================================================
-# morph_codes  — generalised RLE encoding
-# (kept for reference; production uses 4-bit pack_token_array)
+# morph_codes  — generalised RLE (kept for reference)
+# Production uses 4-bit pack_token_array.
 # ===========================================================================
 
 def pack_morph_codes_rle(sentences: List[List[int]]) -> bytes:
@@ -204,11 +204,6 @@ def unpack_morph_codes_rle(data: bytes) -> List[List[int]]:
 
 # ===========================================================================
 # root_lengths  — delta + zigzag + base-128 VLQ
-#
-# Wire format per sentence:
-#   vlq(n_tokens)
-#   vlq(lengths[0])             <- first length stored absolute
-#   vlq(zigzag(delta))...       <- for tokens 1..N, delta = L[i] - L[i-1]
 # ===========================================================================
 
 def pack_root_lengths(sentences: List[List[int]]) -> bytes:
@@ -274,42 +269,24 @@ def unpack_context_matrix(data: bytes, row_keys: List, n_cols: int) -> Dict:
 
 
 # ===========================================================================
-# pos_huffman_bits  — delta + zigzag + base-128 VLQ, scaled x100
+# pos_huffman_bits  — plain uint8 list
 #
-# Sentence-level Huffman costs vary slowly between adjacent sentences.
-# Storing deltas (which cluster near zero) with zigzag+VLQ cuts cost
-# significantly vs storing absolute values.
+# Values are sentence-level Huffman costs that arrive as floats but are
+# always integers in practice (e.g. 164.0, 131.0) and fit in a uint8.
+# x100 scaling was inflating 2-digit integers to 5-digit VLQ values;
+# storing them raw as uint8 (same layout as pos_n_tags) is optimal.
 #
-# Wire format:
-#   1B   n_values
-#   vlq(zigzag(scaled[0]))                <- first value, absolute
-#   vlq(zigzag(scaled[i] - scaled[i-1]))  <- deltas for i = 1..N
+# Wire format:  1B n  |  n x uint8
 # ===========================================================================
 
 def pack_huffman_bits(values: List[float]) -> bytes:
-    if not values:
-        return bytes([0])
-    scaled = [min(round(v * 100), 0xFFFFFF) for v in values]
-    out    = bytearray([len(values)])
-    out   += _vlq_encode(_zigzag_encode(scaled[0]))
-    for i in range(1, len(scaled)):
-        out += _vlq_encode(_zigzag_encode(scaled[i] - scaled[i - 1]))
-    return bytes(out)
+    clamped = [min(int(round(v)), 255) for v in values]
+    return bytes([len(clamped)] + clamped)
 
 
 def unpack_huffman_bits(data: bytes) -> List[float]:
     n = data[0]
-    if n == 0:
-        return []
-    offset = 1
-    zz, offset  = _vlq_decode(data, offset)
-    prev        = _zigzag_decode(zz)
-    result      = [prev / 100.0]
-    for _ in range(n - 1):
-        zz, offset = _vlq_decode(data, offset)
-        prev       = prev + _zigzag_decode(zz)
-        result.append(prev / 100.0)
-    return result
+    return [float(b) for b in data[1: n + 1]]
 
 
 # ===========================================================================
