@@ -24,7 +24,7 @@ import msgpack
 
 from compression.alphabet.morph_codes import apply_morph
 from compression.alphabet.phonetic_map import PHONETIC_CLASSES
-from compression.pipeline.stage1c_symbol_slots import decode_slots_in_roots, unpack_slot_map
+from compression.pipeline.stage1c_symbol_slots import inject_symbols, unpack_slot_map
 from compression.pipeline.stage5_discourse_symbols import decode_symbols
 from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.stage9_autocorrect import autocorrect
@@ -322,16 +322,16 @@ def decompress(input_path: str) -> str:
     )
     roots = _split_roots(char_stream)
 
-    # Stage 1c decode: restore ZSLOT{n} roots back to their § symbols
-    # BEFORE apply_morph so morph codes are applied only to real word roots.
+    # Stage 1c: re-inject § symbols at their saved word positions
+    # BEFORE apply_morph so morph codes align correctly with clean roots.
     if slot_map:
-        roots = decode_slots_in_roots(roots, slot_map)
+        roots = inject_symbols(roots, slot_map)
 
     mc_data, mc_bits   = payload["packed_morph_codes"]
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
     morph_codes_flat   = [c for sent in morph_codes_nested for c in sent]
 
-    # Skip apply_morph for § symbol tokens (safety net; slots should cover all).
+    # §-prefixed tokens: skip apply_morph (they are not inflectable roots)
     words = [
         root if root.startswith("\u00a7") else
         apply_morph(root, morph_codes_flat[i] if i < len(morph_codes_flat) else 0)

@@ -25,10 +25,7 @@ from compression.alphabet.phonetic_map import PHONETIC_CLASSES
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
 from compression.pipeline.stage1_normalize import normalize_text
 from compression.pipeline.stage1b_word_subs import encode_word_subs, merge_symbol_tables
-from compression.pipeline.stage1c_symbol_slots import (
-    encode_slots_in_text,
-    pack_slot_map,
-)
+from compression.pipeline.stage1c_symbol_slots import extract_symbols, pack_slot_map
 from compression.pipeline.stage2_morphology import MorphologicalAnalyser
 from compression.pipeline.stage3_syntax import analyse_sentence
 from compression.pipeline.stage4_discourse import DiscourseAnalyser
@@ -134,14 +131,13 @@ def _serialise_model(model: ContextMixingModel) -> bytes:
 # ---------------------------------------------------------------------------
 
 def _sentinel_layout(lengths: List[int]) -> List[bool]:
-    """True = sentinel position, False = content char position."""
     layout: List[bool] = []
     for t_idx, length in enumerate(lengths):
-        layout.append(True)            # ^
+        layout.append(True)
         layout.extend([False] * length)
-        layout.append(True)            # $
+        layout.append(True)
         if t_idx < len(lengths) - 1:
-            layout.append(False)       # space separator
+            layout.append(False)
     return layout
 
 
@@ -170,7 +166,6 @@ def compress(
 ) -> Dict[str, Any]:
     normalized = normalize_text(text)
 
-    # Stage 4+5: entity/discourse encoding FIRST on clean normalized text.
     print("[Stage 4+5] Running discourse analysis...")
     disc_analyser = DiscourseAnalyser(use_spacy=True)
     stage4_result = disc_analyser.analyse_document(normalized)
@@ -182,25 +177,24 @@ def compress(
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    # Stage 1b: word substitution AFTER entity encoding.
     print("[Stage 1b] Frequency-based word substitution...")
     after_word_subs, word_table = encode_word_subs(discourse_compressed)
     if word_table:
-        print(f"[Stage 1b] Substituted {len(word_table)} word types -> "
-              f"{sum(after_word_subs.count(sym) for sym in word_table)} tokens replaced")
+        print(f"[Stage 1b] Substituted {len(word_table)} word types.")
     else:
         print("[Stage 1b] No words met frequency threshold.")
 
-    # Merged symbol table: both §E and §W entries go into the payload.
     symbol_table = merge_symbol_tables(entity_table, word_table)
 
-    # Stage 1c: replace all remaining § tokens with ZSLOT{n} placeholders
-    # so they survive the phonetic char encoder intact.
-    print("[Stage 1c] Encoding symbol slots...")
-    slotted_text, slot_map = encode_slots_in_text(after_word_subs)
-    print(f"[Stage 1c] {len(slot_map)} symbol slots created.")
+    # Stage 1c: EXTRACT all §-tokens from text before char encoding.
+    # Zero placeholder chars enter the char stream; positions saved in slot_map.
+    print("[Stage 1c] Extracting symbol slots...")
+    clean_text, slot_map = extract_symbols(after_word_subs)
+    print(f"[Stage 1c] {len(slot_map)} symbols extracted from char stream.")
+    print(f"[Stage 1c] Text chars: {len(after_word_subs)} -> {len(clean_text)} "
+          f"(saved {len(after_word_subs) - len(clean_text)} chars)")
 
-    encoded_sentences, pos_freq_table = _encode_sentences(slotted_text, model=model)
+    encoded_sentences, pos_freq_table = _encode_sentences(clean_text, model=model)
 
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)

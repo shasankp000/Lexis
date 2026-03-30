@@ -1,31 +1,27 @@
-"""Stage 1c: Symbol slot substitution for §-prefixed tokens.
+"""Stage 1c: Symbol slot extraction for §-prefixed tokens.
 
 §W / §E / §R tokens cannot pass through the phonetic character encoder
 because '§' is not in PHONETIC_CLASSES and would be silently dropped.
 
-This stage replaces every §-prefixed token with a short pure-alpha
-placeholder zz{base26(n)} that:
-  - Is pure-alpha (no digits — spaCy won't strip trailing digits)
-  - Never appears in natural English (zz prefix is not a real morpheme)
-  - Survives spaCy lemmatisation (lowercased but otherwise unchanged)
-  - Is short: zza, zzb, ..., zzz, zzaa, zzab, ... (3-4 chars for n<702)
-  - Maps back to the original symbol via slot_map stored in the payload
+Approach: extract all §-tokens from the text BEFORE encoding, recording
+their word positions, then re-inject them into the decoded root list in
+the decompressor. Zero placeholder chars enter the char stream.
 
-Slot index encoding (base-26 alpha suffix)
-------------------------------------------
-  0  -> 'a'    (zza)
-  1  -> 'b'    (zzb)
-  25 -> 'z'    (zzz)
-  26 -> 'aa'   (zzaa)
-  27 -> 'ab'   (zzab)
-  ...
+Extract / inject contract
+-------------------------
+    clean_text, slot_map = extract_symbols(text)
+    # encode clean_text through char encoder ...
+    # decode back to root list ...
+    roots = inject_symbols(roots, slot_map)
+    # then _join_words(roots) -> text with § tokens in correct positions
+    # then decode_symbols restores originals
 
-Encode / decode contract
-------------------------
-    text_with_slots, slot_map = encode_slots_in_text(text)
-    # ... encode_sentences(text_with_slots) ...
-    # ... decode back to root list ...
-    roots = decode_slots_in_roots(roots, slot_map)
+slot_map format: list of (word_index, symbol) pairs where word_index is
+the position in the token list AT WHICH the symbol should be re-inserted
+(i.e. before the token currently at that position in the clean list).
+
+Also exposes the older placeholder-based helpers (encode_slots_in_text,
+decode_slots_in_text, etc.) for backwards compatibility.
 """
 
 from __future__ import annotations
@@ -33,22 +29,18 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Tuple
 
-_SYMBOL_RE = re.compile(r"\u00a7[EWR]\d+")  # §E1, §W3, §R0 …
-# Case-insensitive: spaCy lowercases tokens, so 'ZZA' becomes 'zza'
-_SLOT_RE   = re.compile(r"\bzz([a-z]+)\b", re.IGNORECASE)
+_SYMBOL_RE  = re.compile(r"\u00a7[EWR]\d+")   # §E1, §W3, §R0 …
+_SLOT_RE    = re.compile(r"\bzz([a-z]+)\b", re.IGNORECASE)
 _SLOT_PREFIX = "zz"
 
 
 # ---------------------------------------------------------------------------
-# Base-26 index <-> alpha-string helpers
+# Base-26 helpers (kept for placeholder fallback)
 # ---------------------------------------------------------------------------
 
 def _idx_to_alpha(n: int) -> str:
-    """Encode non-negative integer n to a base-26 lowercase alpha string.
-    0->'a', 25->'z', 26->'aa', 27->'ab', ...
-    """
     result = []
-    n += 1  # shift so 0->'a' not empty string
+    n += 1
     while n > 0:
         n, rem = divmod(n - 1, 26)
         result.append(chr(ord('a') + rem))
@@ -56,7 +48,6 @@ def _idx_to_alpha(n: int) -> str:
 
 
 def _alpha_to_idx(s: str) -> int:
-    """Decode base-26 alpha string back to integer. Inverse of _idx_to_alpha."""
     s = s.lower()
     result = 0
     for ch in s:
@@ -65,22 +56,100 @@ def _alpha_to_idx(s: str) -> int:
 
 
 def _make_slot(n: int) -> str:
-    """Return the placeholder string for slot index n, e.g. 0->'zza'."""
     return _SLOT_PREFIX + _idx_to_alpha(n)
 
 
 # ---------------------------------------------------------------------------
-# Text-level encode / decode
+# PRIMARY API: zero-overhead positional extraction
+# ---------------------------------------------------------------------------
+
+def extract_symbols(
+    text: str,
+) -> Tuple[str, List[Tuple[int, str]]]:
+    """
+    Strip all §-prefixed tokens from `text`, recording their positions.
+
+    Splits text on whitespace, identifies §-tokens, removes them, and
+    records (insertion_index, symbol) for each one where insertion_index
+    is the index in the REMAINING (clean) token list before which the
+    symbol should be re-inserted on decode.
+
+    Returns
+    -------
+    clean_text : str
+        Whitespace-joined text with all § tokens removed.
+    slot_map : List[Tuple[int, str]]
+        [(insertion_index, symbol), ...] in document order.
+    """
+    tokens = text.split(' ')
+    slot_map: List[Tuple[int, str]] = []
+    clean_tokens: List[str] = []
+
+    for tok in tokens:
+        if _SYMBOL_RE.fullmatch(tok):
+            # insertion_index = where in clean_tokens this symbol goes
+            # (i.e. before the next clean token, = current length)
+            slot_map.append((len(clean_tokens), tok))
+        else:
+            clean_tokens.append(tok)
+
+    return ' '.join(clean_tokens), slot_map
+
+
+def inject_symbols(
+    roots: List[str],
+    slot_map: List[Tuple[int, str]],
+) -> List[str]:
+    """
+    Re-insert § symbols into a decoded root list at their saved positions.
+
+    slot_map entries are processed in reverse insertion-index order so
+    that earlier insertions don't shift the indices of later ones.
+
+    Parameters
+    ----------
+    roots : List[str]
+        Decoded root word list (output of _split_roots).
+    slot_map : List[Tuple[int, str]]
+        [(insertion_index, symbol), ...] as produced by extract_symbols.
+
+    Returns
+    -------
+    List[str] with § symbols re-inserted at the correct positions.
+    """
+    if not slot_map:
+        return roots
+
+    result = list(roots)
+    # Insert from highest index to lowest so earlier indices stay valid
+    for ins_idx, sym in sorted(slot_map, key=lambda x: -x[0]):
+        ins_idx = min(ins_idx, len(result))  # clamp to end if list is short
+        result.insert(ins_idx, sym)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Payload serialisation (shared by both approaches)
+# ---------------------------------------------------------------------------
+
+def pack_slot_map(slot_map: List[Tuple[int, str]]) -> List[List]:
+    """Serialise slot_map to a msgpack-friendly list of [index, symbol] pairs."""
+    return [[idx, sym] for idx, sym in slot_map]
+
+
+def unpack_slot_map(packed: List[List]) -> List[Tuple[int, str]]:
+    """Deserialise slot_map from msgpack payload."""
+    return [(int(item[0]), str(item[1])) for item in packed]
+
+
+# ---------------------------------------------------------------------------
+# LEGACY: placeholder-based encode/decode (kept for compatibility)
 # ---------------------------------------------------------------------------
 
 def encode_slots_in_text(
     text: str,
 ) -> Tuple[str, List[Tuple[int, str]]]:
-    """
-    Replace every §-prefixed token in `text` with zz{alpha(n)}.
-    Returns (modified_text, slot_map) where slot_map is a list of
-    (slot_index, original_symbol) pairs in left-to-right order.
-    """
+    """Replace every §-prefixed token in `text` with zz{alpha(n)} placeholder."""
     slot_map: List[Tuple[int, str]] = []
     slot_idx = 0
 
@@ -110,10 +179,6 @@ def decode_slots_in_text(
     return _SLOT_RE.sub(_replacer, text)
 
 
-# ---------------------------------------------------------------------------
-# Root-list encode / decode (used by decompressor)
-# ---------------------------------------------------------------------------
-
 def encode_slots_in_roots(
     roots: List[str],
 ) -> Tuple[List[str], List[Tuple[int, str]]]:
@@ -135,10 +200,7 @@ def decode_slots_in_roots(
     roots: List[str],
     slot_map: List[Tuple[int, str]],
 ) -> List[str]:
-    """
-    Restore zz{alpha} entries in a decoded root list back to § symbols.
-    Matches case-insensitively since spaCy lowercases all tokens.
-    """
+    """Restore zz{alpha} entries in a decoded root list back to § symbols."""
     lookup: Dict[int, str] = {idx: sym for idx, sym in slot_map}
     result: List[str] = []
     for root in roots:
@@ -149,17 +211,3 @@ def decode_slots_in_roots(
         else:
             result.append(root)
     return result
-
-
-# ---------------------------------------------------------------------------
-# Payload serialisation
-# ---------------------------------------------------------------------------
-
-def pack_slot_map(slot_map: List[Tuple[int, str]]) -> List[List]:
-    """Serialise slot_map to a msgpack-friendly list of [index, symbol] pairs."""
-    return [[idx, sym] for idx, sym in slot_map]
-
-
-def unpack_slot_map(packed: List[List]) -> List[Tuple[int, str]]:
-    """Deserialise slot_map from msgpack payload."""
-    return [(int(item[0]), str(item[1])) for item in packed]
