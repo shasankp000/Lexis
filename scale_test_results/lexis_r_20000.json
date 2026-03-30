@@ -1,0 +1,11 @@
+{
+  "input_chars": 20000,
+  "original_bytes": 20510,
+  "payload_bytes": 22585,
+  "char_stream_bpb": 2.3629,
+  "full_payload_bpb": 8.8094,
+  "word_overlap_pct": 79.36,
+  "restored_len": 19349,
+  "compress_sec": 22.16,
+  "decompress_sec": 1.02
+}
