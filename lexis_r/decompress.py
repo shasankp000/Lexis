@@ -30,8 +30,8 @@ from lexis_r.lz77_pos import unpack_pos_tags_lz77
 from lexis_r.payload import (
     POS_VOCAB,
     unpack_huffman_bits,
-    unpack_morph_codes_rle,
     unpack_root_lengths,
+    unpack_token_array,
     unpack_u8_list,
 )
 
@@ -61,9 +61,8 @@ def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
     lz77_bytes      = bytes(payload["packed_pos_tags_lz77"])
     pos_tags_nested = unpack_pos_tags_lz77(lz77_bytes, pos_n_tags, POS_VOCAB)
 
-    morph_codes_nested = unpack_morph_codes_rle(
-        bytes(payload["packed_morph_codes_rle"])
-    )
+    mc_data, mc_bits   = payload["packed_morph_codes"]
+    morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
 
     root_lengths_nested = unpack_root_lengths(
         bytes(payload["packed_root_lengths_vlq"])
@@ -285,10 +284,9 @@ def decompress(input_path: str) -> str:
     char_stream = _reconstruct_chars(char_classes, pos_deltas, sentence_char_counts)
     roots       = _split_roots(char_stream)
 
-    morph_codes_nested = unpack_morph_codes_rle(
-        bytes(payload["packed_morph_codes_rle"])
-    )
-    morph_codes_flat = [c for sent in morph_codes_nested for c in sent]
+    mc_data, mc_bits   = payload["packed_morph_codes"]
+    morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
+    morph_codes_flat   = [c for sent in morph_codes_nested for c in sent]
 
     words  = [
         apply_morph(root, morph_codes_flat[i] if i < len(morph_codes_flat) else 0)

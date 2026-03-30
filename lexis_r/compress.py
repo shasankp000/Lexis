@@ -35,9 +35,9 @@ from lexis_r.lz77_pos import pack_pos_tags_lz77
 from lexis_r.payload import (
     POS_TO_IDX,
     pack_huffman_bits,
-    pack_morph_codes_rle,
     pack_pos_freq_table,
     pack_root_lengths,
+    pack_token_array,
     pack_u8_list,
 )
 
@@ -239,11 +239,8 @@ def compress(
     lz77_pos_bytes = pack_pos_tags_lz77(pos_tags_nested, POS_TO_IDX)
     print(f"[Stage 7] pos_tags: {lz77_n_tokens} tokens -> {len(lz77_pos_bytes)} bytes")
 
-    print("[Stage 7] RLE encoding morph_codes...")
-    mc_rle = pack_morph_codes_rle(morph_codes_nested)
-    print(f"[Stage 7] morph_codes: {sum(len(s) for s in morph_codes_nested)} tokens -> {len(mc_rle)} bytes")
-
-    rl_vlq = pack_root_lengths(root_lengths_nested)
+    mc_data, mc_bits = pack_token_array(morph_codes_nested, 4)
+    rl_vlq           = pack_root_lengths(root_lengths_nested)
 
     payload: Dict[str, Any] = {
         "lexis_variant":               "reconstructed",
@@ -259,7 +256,7 @@ def compress(
         "packed_sentence_char_counts": pack_u8_list(sentence_char_counts),
         "packed_pos_huffman_bits":     pack_huffman_bits(pos_huffman_bits_list),
         "packed_pos_n_tags":           pack_u8_list(pos_n_tags_list),
-        "packed_morph_codes_rle":      mc_rle,
+        "packed_morph_codes":          (mc_data, mc_bits),
         "packed_root_lengths_vlq":     rl_vlq,
         "packed_pos_freq_table":       pack_pos_freq_table(pos_freq_table),
         "num_symbols":                 len(char_classes),
