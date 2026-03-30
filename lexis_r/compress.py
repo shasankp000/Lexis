@@ -1,15 +1,4 @@
-"""Lexis-R compressor.
-
-Writes a self-contained .lexisr msgpack file, post-compressed with zstd
-level 19.  The trained ContextMixingModel is serialised directly into
-the payload (zlib-compressed) so the decompressor can load it without
-re-training.
-
-Usage
------
-    from lexis_r.compress import compress
-    stats = compress(text, "output.lexisr")
-"""
+"""Lexis-R compressor."""
 
 from __future__ import annotations
 
@@ -53,10 +42,6 @@ except ImportError:
         return it
 
 
-# ---------------------------------------------------------------------------
-# spaCy loader
-# ---------------------------------------------------------------------------
-
 def _get_nlp(model: str | None = None):
     from compression.config import SPACY_MAX_LENGTH, SPACY_MODEL
     model_name = model or SPACY_MODEL
@@ -75,10 +60,6 @@ def _get_nlp(model: str | None = None):
         raise RuntimeError(f"spaCy model '{model_name}' not available: {exc}") from exc
 
 
-# ---------------------------------------------------------------------------
-# Pipeline helpers
-# ---------------------------------------------------------------------------
-
 def _encode_sentences(
     text: str, model: str | None = None
 ) -> tuple[list[dict], dict[str, int]]:
@@ -88,31 +69,19 @@ def _encode_sentences(
     struct_encoder = StructuralEncoder(sym_alphabet)
     char_encoder   = CharacterEncoder()
     chunks         = list(chunk_text(text))
-
     sentence_data: list[tuple] = []
     pos_sentences: list[list[str]] = []
-
     for i, chunk in enumerate(chunks):
-        doc   = nlp(chunk)
-        sents = list(doc.sents)
-        for sent in tqdm(sents, desc=f"Chunk {i+1}/{len(chunks)}", unit="sent"):
+        doc = nlp(chunk)
+        for sent in tqdm(list(doc.sents), desc=f"Chunk {i+1}/{len(chunks)}", unit="sent"):
             syntax     = analyse_sentence(sent)
             morphology = analyser.analyse_sentence(sent.text)
             sentence_data.append((morphology, syntax))
             pos_sentences.append(syntax.pos_tags)
-
     freq_table = struct_encoder.build_pos_frequency_table(pos_sentences)
-
     encoded: list[dict] = []
-    for morphology, syntax in tqdm(
-        sentence_data, desc="Stage 5 — encoding", unit="sent"
-    ):
-        encoded.append(
-            char_encoder.encode_sentence_full(
-                morphology, syntax, struct_encoder, freq_table
-            )
-        )
-
+    for morphology, syntax in tqdm(sentence_data, desc="Stage 5 — encoding", unit="sent"):
+        encoded.append(char_encoder.encode_sentence_full(morphology, syntax, struct_encoder, freq_table))
     return encoded, freq_table
 
 
@@ -126,10 +95,6 @@ def _serialise_model(model: ContextMixingModel) -> bytes:
         os.unlink(tmp_path)
 
 
-# ---------------------------------------------------------------------------
-# Sentinel stripping  (per-sentence)
-# ---------------------------------------------------------------------------
-
 def _sentinel_layout(lengths: List[int]) -> List[bool]:
     layout: List[bool] = []
     for t_idx, length in enumerate(lengths):
@@ -142,22 +107,16 @@ def _sentinel_layout(lengths: List[int]) -> List[bool]:
 
 
 def _strip_sentinel_deltas_per_sentence(
-    pos_deltas_nested:   List[List[int]],
+    pos_deltas_nested: List[List[int]],
     root_lengths_nested: List[List[int]],
 ) -> Tuple[List[List[int]], List[int]]:
     content_nested: List[List[int]] = []
     for s_idx, sent_deltas in enumerate(pos_deltas_nested):
         lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
         layout  = _sentinel_layout(lengths)
-        content = [d for d, is_sent in zip(sent_deltas, layout) if not is_sent]
-        content_nested.append(content)
-    content_counts = [len(c) for c in content_nested]
-    return content_nested, content_counts
+        content_nested.append([d for d, is_sent in zip(sent_deltas, layout) if not is_sent])
+    return content_nested, [len(c) for c in content_nested]
 
-
-# ---------------------------------------------------------------------------
-# Public compress function
-# ---------------------------------------------------------------------------
 
 def compress(
     text: str,
@@ -170,30 +129,18 @@ def compress(
     disc_analyser = DiscourseAnalyser(use_spacy=True)
     stage4_result = disc_analyser.analyse_document(normalized)
     discourse_compressed, entity_table = encode_symbols(normalized, stage4_result)
-    orig_len = len(normalized)
-    disc_len = len(discourse_compressed)
-    print(
-        f"[Stage 4+5] {orig_len} -> {disc_len} chars "
-        f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
-    )
+    orig_len, disc_len = len(normalized), len(discourse_compressed)
+    print(f"[Stage 4+5] {orig_len} -> {disc_len} chars ({100*(orig_len-disc_len)/orig_len:.2f}% reduction)")
 
     print("[Stage 1b] Frequency-based word substitution...")
     after_word_subs, word_table = encode_word_subs(discourse_compressed)
-    if word_table:
-        print(f"[Stage 1b] Substituted {len(word_table)} word types.")
-    else:
-        print("[Stage 1b] No words met frequency threshold.")
-
+    print(f"[Stage 1b] Substituted {len(word_table)} word types." if word_table else "[Stage 1b] No words met frequency threshold.")
     symbol_table = merge_symbol_tables(entity_table, word_table)
 
-    # Stage 1c: strip all §-tokens, record char offsets in clean text.
-    # The clean_text is what gets encoded; char offsets let us re-splice
-    # symbols into the final joined string after decoding.
     print("[Stage 1c] Extracting symbol slots...")
     clean_text, slot_map = extract_symbols(after_word_subs)
-    print(f"[Stage 1c] {len(slot_map)} symbols extracted. "
-          f"Chars: {len(after_word_subs)} -> {len(clean_text)} "
-          f"(saved {len(after_word_subs) - len(clean_text)} chars)")
+    clean_len = len(clean_text)
+    print(f"[Stage 1c] {len(slot_map)} symbols extracted. Chars: {len(after_word_subs)} -> {clean_len} (saved {len(after_word_subs) - clean_len} chars)")
 
     encoded_sentences, pos_freq_table = _encode_sentences(clean_text, model=model)
 
@@ -201,11 +148,7 @@ def compress(
     context_model.train(encoded_sentences)
     model_bytes = _serialise_model(context_model)
     model_bytes_compressed = zlib.compress(model_bytes, level=9)
-    print(
-        f"[Stage 7] context_model_data: {len(model_bytes)} -> "
-        f"{len(model_bytes_compressed)} bytes "
-        f"({100*(len(model_bytes)-len(model_bytes_compressed))/len(model_bytes):.1f}% reduction)"
-    )
+    print(f"[Stage 7] context_model_data: {len(model_bytes)} -> {len(model_bytes_compressed)} bytes ({100*(len(model_bytes)-len(model_bytes_compressed))/len(model_bytes):.1f}% reduction)")
 
     char_classes:          List[int]       = []
     pos_deltas_nested:     List[List[int]] = []
@@ -228,18 +171,14 @@ def compress(
         root_lengths_nested.append([len(r) for r in sent.get("roots", [])])
 
     print("[Stage 7] Stripping sentinel deltas (per-sentence)...")
-    content_nested, content_counts = _strip_sentinel_deltas_per_sentence(
-        pos_deltas_nested, root_lengths_nested
-    )
-    content_flat = [d for sent_c in content_nested for d in sent_c]
+    content_nested, content_counts = _strip_sentinel_deltas_per_sentence(pos_deltas_nested, root_lengths_nested)
+    content_flat = [d for s in content_nested for d in s]
     total_orig   = sum(len(s) for s in pos_deltas_nested)
     total_strip  = sum(content_counts)
-    print(f"[Stage 7] pos_deltas: {total_orig} -> {total_strip} "
-          f"(stripped {total_orig - total_strip} sentinels across {len(pos_deltas_nested)} sentences)")
+    print(f"[Stage 7] pos_deltas: {total_orig} -> {total_strip} (stripped {total_orig - total_strip} sentinels across {len(pos_deltas_nested)} sentences)")
 
     print("[Stage 7] Arithmetic encoding char stream...")
-    enc              = ArithmeticEncoder()
-    compressed_bytes = enc.encode(char_classes, context_model, encoded_sentences)
+    compressed_bytes = ArithmeticEncoder().encode(char_classes, context_model, encoded_sentences)
 
     print("[Stage 7] Huffman encoding pos_deltas...")
     huff_table_bytes, huff_bitstream = huffman.encode(content_flat)
@@ -252,20 +191,15 @@ def compress(
     rl_flat   = [l for sent in root_lengths_nested for l in sent]
     rl_counts = [len(sent) for sent in root_lengths_nested]
     rl_huff_table, rl_huff_stream = huffman.encode(rl_flat)
-    print(
-        f"[Stage 7] root_lengths: {len(rl_flat)} values -> "
-        f"{len(rl_huff_stream)} B huffman stream (+{len(rl_huff_table)} B table)"
-    )
+    print(f"[Stage 7] root_lengths: {len(rl_flat)} values -> {len(rl_huff_stream)} B huffman stream (+{len(rl_huff_table)} B table)")
 
     mc_data, mc_bits = pack_token_array(morph_codes_nested, 4)
 
-    # Store clean_text in payload so decompressor can use it as
-    # the scaling reference for char-offset splice.
     payload: Dict[str, Any] = {
         "lexis_variant":               "reconstructed",
         "symbol_table":                symbol_table,
         "slot_map":                    pack_slot_map(slot_map),
-        "slot_clean_text":             clean_text,
+        "slot_clean_len":              clean_len,          # int only — not the full text
         "context_model_data":          model_bytes_compressed,
         "compressed_bitstream":        compressed_bytes,
         "pos_deltas_huffman_table":    huff_table_bytes,
@@ -286,20 +220,13 @@ def compress(
         "num_symbols":                 len(char_classes),
     }
 
-    packed       = msgpack.packb(payload, use_bin_type=True)
-    packed_bytes = cast(bytes, packed)
-
+    packed_bytes = cast(bytes, msgpack.packb(payload, use_bin_type=True))
     print("[Stage 8] zstd compressing payload (level=19)...")
     final_bytes = compress_payload(packed_bytes, level=19)
-    print(
-        f"[Stage 8] msgpack payload: {len(packed_bytes)} -> "
-        f"{len(final_bytes)} bytes "
-        f"({100*(len(packed_bytes)-len(final_bytes))/len(packed_bytes):.1f}% reduction)"
-    )
+    print(f"[Stage 8] msgpack payload: {len(packed_bytes)} -> {len(final_bytes)} bytes ({100*(len(packed_bytes)-len(final_bytes))/len(packed_bytes):.1f}% reduction)")
 
     Path(output_path).write_bytes(final_bytes)
-
-    original_size   = len(text.encode("utf-8"))
+    original_size = len(text.encode("utf-8"))
     compressed_size = len(compressed_bytes)
     print(f"[Lexis-R] Wrote {output_path}")
     print(f"[Lexis-R] char-stream bpb  : {compressed_size * 8 / original_size:.4f}")
@@ -307,11 +234,11 @@ def compress(
     print(f"[Lexis-R] payload size     : {len(final_bytes)} bytes")
 
     return {
-        "original_size":      original_size,
-        "compressed_size":    compressed_size,
-        "msgpack_size":       len(packed_bytes),
-        "payload_size":       len(final_bytes),
-        "bpb":                compressed_size * 8 / original_size if original_size else 0.0,
-        "full_payload_bpb":   len(final_bytes) * 8 / original_size if original_size else 0.0,
-        "discourse_symbols":  len(symbol_table),
+        "original_size":    original_size,
+        "compressed_size":  compressed_size,
+        "msgpack_size":     len(packed_bytes),
+        "payload_size":     len(final_bytes),
+        "bpb":              compressed_size * 8 / original_size if original_size else 0.0,
+        "full_payload_bpb": len(final_bytes) * 8 / original_size if original_size else 0.0,
+        "discourse_symbols": len(symbol_table),
     }
