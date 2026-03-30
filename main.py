@@ -28,7 +28,7 @@ verbose msgpack nested dicts/lists:
 
   pos_tags        5-bit/token bit-pack  (8-bit sentence-length prefix)
   morph_codes     4-bit/token bit-pack  (same scheme)
-  root_lengths    4-bit/token bit-pack  (same scheme)
+  root_lengths    VLQ bytes  (no upper bound — fixes 4-bit clamping bug)
   char_context    flat 7x7   VLQ bytes  (row-major, no keys)
   morph_context   flat 13x7  VLQ bytes
   struct_context  flat 18x7  VLQ bytes + zlib
@@ -87,6 +87,7 @@ from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.stage7_arithmetic import ArithmeticDecoder, ArithmeticEncoder
 from compression.pipeline.stage9_autocorrect import autocorrect
 from compression.pipeline.utils import chunk_text
+from compression.root_lengths_vlq import pack_root_lengths, unpack_root_lengths
 
 # Variant constants
 VARIANT_EMBEDDED = "embedded"           # Lexis-E: context model stored in payload
@@ -131,8 +132,10 @@ def _vlq_decode_stream(data: bytes, offset: int) -> tuple[int, int]:
     return value, offset
 
 
-# ── Token arrays: 5-bit (pos_tags) or 4-bit (morph_codes, root_lengths) ─────
+# ── Token arrays: 5-bit (pos_tags) or 4-bit (morph_codes) ───────────────────
 # Layout: [ 8-bit sentence length | N-bit val | N-bit val | ... | next sentence ]
+# NOTE: root_lengths now uses VLQ (see compression/root_lengths_vlq.py) so
+#       that roots longer than 15 characters are not silently truncated.
 
 def _pack_token_array(sentences: list[list[int]], bits_per_val: int) -> tuple[bytes, int]:
     """Pack nested int list into a compact bitstream. Returns (bytes, n_bits)."""
@@ -615,8 +618,10 @@ def _build_encoded_sentences_from_metadata(payload: Dict[str, Any]) -> List[Dict
     else:
         morph_codes_nested = payload.get("morph_codes", [])
 
-    # ── root_lengths ──────────────────────────────────────────────────────────
-    if "packed_root_lengths" in payload:
+    # ── root_lengths: prefer VLQ (no clamping), fall back to legacy 4-bit ─────
+    if "packed_root_lengths_vlq" in payload:
+        root_lengths = unpack_root_lengths(bytes(payload["packed_root_lengths_vlq"]))
+    elif "packed_root_lengths" in payload:
         rl_data, rl_bits = payload["packed_root_lengths"]
         root_lengths = _unpack_token_array(bytes(rl_data), rl_bits, 4)
     else:
@@ -636,7 +641,7 @@ def _build_encoded_sentences_from_metadata(payload: Dict[str, Any]) -> List[Dict
 
     encoded: List[Dict] = []
     for idx, lengths in enumerate(root_lengths):
-        sentence_pos   = pos_tags[idx]         if idx < len(pos_tags)         else []
+        sentence_pos   = pos_tags[idx]           if idx < len(pos_tags)           else []
         sentence_morph = morph_codes_nested[idx] if idx < len(morph_codes_nested) else []
         char_pos_tags:    List[str] = []
         char_morph_codes: List[int] = []
@@ -779,8 +784,10 @@ def compress_to_file(
 
     # ── Pack all token arrays ─────────────────────────────────────────────────
     pt_data,  pt_bits  = _pack_pos_tags(pos_tags_nested)
-    mc_data,  mc_bits  = _pack_token_array(morph_codes_nested,  4)
-    rl_data,  rl_bits  = _pack_token_array(root_lengths_nested, 4)
+    mc_data,  mc_bits  = _pack_token_array(morph_codes_nested, 4)
+    # root_lengths: use VLQ (no upper bound) — old 4-bit key kept for compat
+    rl_vlq             = pack_root_lengths(root_lengths_nested)
+    rl_data,  rl_bits  = _pack_token_array(root_lengths_nested, 4)  # legacy fallback
 
     # ── Pack sentence-level arrays ────────────────────────────────────────────
     phb_data = _pack_huffman_bits(pos_huffman_bits_list)
@@ -796,36 +803,39 @@ def compress_to_file(
     variant = VARIANT_EMBEDDED if store_model else VARIANT_RECONSTRUCTED
 
     metadata: Dict[str, Any] = {
-        "lexis_variant":          variant,
-        "symbol_table":           symbol_table,
-        "compressed_bitstream":   compressed_bytes,
-        "pos_deltas_bitstream":   pos_deltas_stream,
-        "packed_pos_deltas_counts": pdc_data,
-        "pos_deltas_count":       len(char_pos_deltas),
+        "lexis_variant":               variant,
+        "symbol_table":                symbol_table,
+        "compressed_bitstream":        compressed_bytes,
+        "pos_deltas_bitstream":        pos_deltas_stream,
+        "packed_pos_deltas_counts":    pdc_data,
+        "pos_deltas_count":            len(char_pos_deltas),
         "packed_sentence_char_counts": scc_data,
         "packed_pos_huffman_bits":     phb_data,
         "packed_pos_n_tags":           pnt_data,
-        "packed_pos_tags":        (pt_data, pt_bits),
-        "packed_morph_codes":     (mc_data, mc_bits),
-        "packed_root_lengths":    (rl_data, rl_bits),
-        "num_symbols":            len(char_classes),
-        "num_char_classes":       7,
-        "packed_pos_freq_table":  pft_data,
+        "packed_pos_tags":             (pt_data, pt_bits),
+        "packed_morph_codes":          (mc_data, mc_bits),
+        # VLQ key (preferred by decompressor — no length clamping)
+        "packed_root_lengths_vlq":     rl_vlq,
+        # Legacy 4-bit key kept so old builds can still read new files
+        "packed_root_lengths":         (rl_data, rl_bits),
+        "num_symbols":                 len(char_classes),
+        "num_char_classes":            7,
+        "packed_pos_freq_table":       pft_data,
     }
 
     if store_model:
         # Lexis-E: embed compact context model.
         pv_data, pv_bits = _pack_pos_vocab(context_model.pos_vocab)
         metadata.update({
-            "packed_model_weights":   _pack_weights(context_model.weights),
-            "packed_char_context":    _pack_context_matrix(
+            "packed_model_weights":  _pack_weights(context_model.weights),
+            "packed_char_context":   _pack_context_matrix(
                 context_model.char_context, _CHAR_CLASSES, 7
             ),
-            "packed_morph_context":   _pack_context_matrix(
+            "packed_morph_context":  _pack_context_matrix(
                 {k: dict(v) for k, v in context_model.morph_context.items()},
                 _MORPH_CODES_R, 7
             ),
-            "packed_struct_context":  zlib.compress(
+            "packed_struct_context": zlib.compress(
                 _pack_context_matrix(
                     {k: dict(v) for k, v in context_model.struct_context.items()},
                     _POS_VOCAB, 7
@@ -840,17 +850,17 @@ def compress_to_file(
     packed_bytes = cast(bytes, packed)
     Path(output_path).write_bytes(packed_bytes)
 
-    original_size    = len(text.encode("utf-8"))
-    compressed_size  = len(compressed_bytes)
+    original_size   = len(text.encode("utf-8"))
+    compressed_size = len(compressed_bytes)
     return {
-        "lexis_variant":          variant,
-        "original_size":          original_size,
-        "compressed_size":        compressed_size,
-        "compression_ratio":      compressed_size / original_size if original_size else 0.0,
-        "bpb":                    (compressed_size * 8) / original_size if original_size else 0.0,
-        "payload_size":           len(packed_bytes),
-        "full_payload_bpb":       (len(packed_bytes) * 8) / original_size if original_size else 0.0,
-        "discourse_symbols":      len(symbol_table),
+        "lexis_variant":           variant,
+        "original_size":           original_size,
+        "compressed_size":         compressed_size,
+        "compression_ratio":       compressed_size / original_size if original_size else 0.0,
+        "bpb":                     (compressed_size * 8) / original_size if original_size else 0.0,
+        "payload_size":            len(packed_bytes),
+        "full_payload_bpb":        (len(packed_bytes) * 8) / original_size if original_size else 0.0,
+        "discourse_symbols":       len(symbol_table),
         "discourse_reduction_pct": round(100 * (orig_len - disc_len) / orig_len, 2)
         if orig_len else 0.0,
     }
@@ -897,8 +907,8 @@ def decompress(input_path: str) -> str:
             print("[Decompress] Lexis-R: re-training context model from metadata...")
             context_model = _build_context_model_from_sentences(encoded_sentences)
 
-        decoder      = ArithmeticDecoder()
-        num_symbols  = int(
+        decoder     = ArithmeticDecoder()
+        num_symbols = int(
             payload.get("num_symbols", len(payload.get("char_morph_codes", [])))
         )
         char_classes = decoder.decode(
