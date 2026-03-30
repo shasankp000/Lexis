@@ -7,3 +7,4 @@ compression/alphabet/__pycache__/
 .pytest_cache
 .venv*/
 *.bin
+lexis*.md
