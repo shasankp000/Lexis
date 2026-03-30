@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -248,7 +249,7 @@ def decompress(input_path: str) -> str:
     symbol_table: dict = payload.get("symbol_table", {})
 
     print("[Decompress] Loading context model from payload...")
-    context_model = _load_model(bytes(payload["context_model_data"]))
+    context_model = _load_model(zlib.decompress(bytes(payload["context_model_data"])))
 
     print("[Decompress] Rebuilding context stream from metadata...")
     encoded_sentences = _build_encoded_sentences(payload)

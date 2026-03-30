@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import zlib
 from pathlib import Path
 from typing import Any, cast, Dict, List
 
@@ -199,6 +200,12 @@ def compress(
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
     model_bytes = _serialise_model(context_model)
+    model_bytes_compressed = zlib.compress(model_bytes, level=9)
+    print(
+        f"[Stage 7] context_model_data: {len(model_bytes)} -> "
+        f"{len(model_bytes_compressed)} bytes "
+        f"({100*(len(model_bytes)-len(model_bytes_compressed))/len(model_bytes):.1f}% reduction)"
+    )
 
     char_classes:          List[int]       = []
     char_pos_deltas:       List[int]       = []
@@ -245,7 +252,7 @@ def compress(
     payload: Dict[str, Any] = {
         "lexis_variant":               "reconstructed",
         "symbol_table":                symbol_table,
-        "context_model_data":          model_bytes,
+        "context_model_data":          model_bytes_compressed,
         "compressed_bitstream":        compressed_bytes,
         "pos_deltas_huffman_table":    huff_table_bytes,
         "pos_deltas_huffman_stream":   huff_bitstream,
