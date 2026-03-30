@@ -8,7 +8,7 @@ Layout summary
 --------------
   pos_tags              5-bit/token bit-pack  (8-bit sentence-length prefix)
   morph_codes           4-bit/token bit-pack  (same scheme; morph codes 0-12)
-  root_lengths          base-128 VLQ
+  root_lengths          delta + zigzag + base-128 VLQ
   char/morph_context    flat VLQ bytes, row-major, no keys
   struct_context        flat VLQ bytes + zlib
   pos_huffman_bits      base-128 VLQ per value scaled ×100  (1B count prefix)
@@ -25,6 +25,7 @@ Encoding selection rationale
   base-128 VLQ : best for values with unbounded range; costs 1B for 0-127
   base-256 VLQ : best for values 256+ that are rarely small (e.g. freq counts)
   uint8        : best when values are provably < 256 (sentence lengths, n_tags)
+  delta+zigzag : best when consecutive values are correlated (root_lengths)
 
 All helpers are pure functions: bytes in, bytes/value out.
 """
@@ -155,15 +156,34 @@ def unpack_pos_tags(data: bytes, n_bits: int) -> List[List[str]]:
 
 
 # ===========================================================================
-# root_lengths  — base-128 VLQ, no upper bound
+# root_lengths  — delta + zigzag + base-128 VLQ
+#
+# Wire format per sentence:
+#   vlq(n_tokens)
+#   vlq(lengths[0])             <- first length stored absolute
+#   vlq(zigzag(delta))...       <- for tokens 1..N, delta = L[i] - L[i-1]
+#
+# English root lengths cluster around 3-8 with consecutive differences
+# of ±0-3 in most cases. Zigzag maps those to 0-6, all fitting in 1B.
+# Compared to storing absolute lengths (also 1B for 1-127), the gain
+# comes from long words after short ones: e.g. length 17 after length 4
+# stores delta=13 (zigzag=26, 1B) vs absolute 17 (1B) — wash — but
+# length 9 after length 8 stores delta=1 (zigzag=2, 1B) vs absolute 9
+# (1B) — wash. The real gain: length 9 after length 2 was two 1B values;
+# now delta=7 zigzag=14 is still 1B. Net: eliminates 2B edge cases.
 # ===========================================================================
 
 def pack_root_lengths(sentences: List[List[int]]) -> bytes:
     out = bytearray(_vlq_encode(len(sentences)))
     for sent in sentences:
         out += _vlq_encode(len(sent))
-        for length in sent:
-            out += _vlq_encode(length)
+        if not sent:
+            continue
+        out += _vlq_encode(sent[0])           # first value absolute
+        prev = sent[0]
+        for length in sent[1:]:
+            out += _vlq_encode(_zigzag_encode(length - prev))
+            prev = length
     return bytes(out)
 
 
@@ -173,10 +193,17 @@ def unpack_root_lengths(data: bytes) -> List[List[int]]:
     sentences: List[List[int]] = []
     for _ in range(n_sents):
         n_tokens, offset = _vlq_decode(data, offset)
-        lengths = []
-        for _ in range(n_tokens):
-            length, offset = _vlq_decode(data, offset)
+        if n_tokens == 0:
+            sentences.append([])
+            continue
+        first, offset = _vlq_decode(data, offset)
+        lengths = [first]
+        prev = first
+        for _ in range(n_tokens - 1):
+            zz, offset = _vlq_decode(data, offset)
+            length = prev + _zigzag_decode(zz)
             lengths.append(length)
+            prev = length
         sentences.append(lengths)
     return sentences
 
