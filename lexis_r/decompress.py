@@ -1,8 +1,8 @@
 """Lexis-R decompressor.
 
-Reads a .lexisr msgpack file, re-trains the context model from the
-stored structural metadata, then arithmetic-decodes the char stream
-back to text.
+Reads a .lexisr msgpack file, loads the serialised ContextMixingModel
+directly from the payload (no re-training), then arithmetic-decodes
+the char stream back to text.
 
 Usage
 -----
@@ -12,6 +12,8 @@ Usage
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -26,40 +28,51 @@ from lexis_r.arithmetic import ArithmeticDecoder
 from lexis_r.payload import (
     unpack_deltas_counts,
     unpack_huffman_bits,
-    unpack_pos_tags,
     unpack_root_lengths,
     unpack_token_array,
     unpack_u8_list,
-    unpack_pos_freq_table,
 )
 
 
 # ---------------------------------------------------------------------------
-# Re-build encoded_sentences from payload metadata
+# Context model loader
+# ---------------------------------------------------------------------------
+
+def _load_model(model_bytes: bytes) -> ContextMixingModel:
+    """Load a ContextMixingModel from raw bytes (written by compress.py)."""
+    with tempfile.NamedTemporaryFile(suffix=".lcm", delete=False) as tf:
+        tf.write(model_bytes)
+        tmp_path = tf.name
+    try:
+        model = ContextMixingModel()
+        model.load(tmp_path)
+        return model
+    finally:
+        os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# encoded_sentences rebuilder  (used only for build_context_stream)
 # ---------------------------------------------------------------------------
 
 def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
     """
-    Reconstruct the per-symbol context streams (char_pos_tags,
-    char_morph_codes) from the stored structural metadata.
-
-    root_lengths are read from the VLQ key (packed_root_lengths_vlq)
-    which has no upper-bound clamping.
+    Rebuild the per-symbol context stream lists from packed metadata.
+    These are only used by ArithmeticDecoder.decode() via
+    build_context_stream() — not for model training.
     """
-    # ─ pos_tags ──────────────────────────────────────────────────────────
-    pt_data, pt_bits = payload["packed_pos_tags"]
-    pos_tags_nested  = unpack_pos_tags(bytes(pt_data), pt_bits)
+    from lexis_r.payload import unpack_pos_tags
 
-    # ─ morph_codes ────────────────────────────────────────────────────
-    mc_data, mc_bits  = payload["packed_morph_codes"]
+    pt_data, pt_bits   = payload["packed_pos_tags"]
+    pos_tags_nested    = unpack_pos_tags(bytes(pt_data), pt_bits)
+
+    mc_data, mc_bits   = payload["packed_morph_codes"]
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
 
-    # ─ root_lengths (VLQ — no clamping) ───────────────────────────────
     root_lengths_nested = unpack_root_lengths(
         bytes(payload["packed_root_lengths_vlq"])
     )
 
-    # ─ sentence-level scalars ──────────────────────────────────────────
     pos_bits   = unpack_huffman_bits(bytes(payload["packed_pos_huffman_bits"]))
     pos_n_tags = unpack_u8_list(bytes(payload["packed_pos_n_tags"]))
 
@@ -74,16 +87,12 @@ def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
         for tok_idx, length in enumerate(lengths):
             pos_tag    = sent_pos[tok_idx]   if tok_idx < len(sent_pos)   else "X"
             morph_code = sent_morph[tok_idx] if tok_idx < len(sent_morph) else 0
-            # start marker
-            char_pos_tags.append("X");    char_morph_codes.append(0)
-            # root characters
-            char_pos_tags.extend([pos_tag]    * length)
+            char_pos_tags.append("X");      char_morph_codes.append(0)            # ^ marker
+            char_pos_tags.extend([pos_tag]      * length)
             char_morph_codes.extend([morph_code] * length)
-            # end marker
-            char_pos_tags.append("X");    char_morph_codes.append(0)
-            # space marker between tokens (not after last)
+            char_pos_tags.append("X");      char_morph_codes.append(0)            # $ marker
             if tok_idx < len(lengths) - 1:
-                char_pos_tags.append("X"); char_morph_codes.append(0)
+                char_pos_tags.append("X"); char_morph_codes.append(0)            # _ space
 
         encoded.append({
             "char_pos_tags":    char_pos_tags,
@@ -111,23 +120,22 @@ def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
 
 
 def _reconstruct_chars(
-    char_classes:        List[int],
-    pos_deltas:          List[int],
+    char_classes:         List[int],
+    pos_deltas:           List[int],
     sentence_char_counts: List[int],
 ) -> str:
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     chars: List[str] = []
     idx = 0
     for count in sentence_char_counts:
-        classes = char_classes[idx: idx + count]
-        deltas  = pos_deltas[idx:  idx + count]
+        classes   = char_classes[idx: idx + count]
+        deltas    = pos_deltas[idx:  idx + count]
         positions = _cumulative_from_deltas(deltas)
         for cls, pos in zip(classes, positions):
             ch = inverse_map.get((cls, pos))
             if ch is not None:
                 chars.append(ch)
         idx += count
-    # any trailing symbols not covered by sentence counts
     if idx < len(char_classes):
         classes   = char_classes[idx:]
         deltas    = pos_deltas[idx:]
@@ -158,7 +166,7 @@ def _split_roots(char_stream: str) -> List[str]:
 
 _ATTACH_LEFT  = set(".,;:!?)'-—%-/")
 _ATTACH_RIGHT = set("($#/")
-_OPEN_QUOTE_AFTER = set("!?(— ")
+_OPEN_QUOTE_AFTER = set("!?( — ")
 
 
 def _join_words(words: List[str]) -> str:
@@ -201,9 +209,9 @@ def decompress(input_path: str) -> str:
 
     Steps:
       1. Unpack msgpack payload.
-      2. Rebuild encoded_sentences from structural metadata.
-      3. Re-train ContextMixingModel on those encoded_sentences.
-      4. Arithmetic-decode the char bitstream.
+      2. Load ContextMixingModel directly from payload bytes.
+      3. Rebuild encoded_sentences for build_context_stream.
+      4. Arithmetic-decode char bitstream.
       5. Decode pos-delta bitstream.
       6. Reconstruct char stream → roots → words → text.
       7. Re-expand discourse symbols and autocorrect.
@@ -213,19 +221,18 @@ def decompress(input_path: str) -> str:
 
     symbol_table: dict = payload.get("symbol_table", {})
 
-    # ─ Step 2: rebuild encoded_sentences ──────────────────────────────────
-    print("[Decompress] Rebuilding encoded_sentences from metadata...")
+    # ─ Step 2: load exact trained model ───────────────────────────────────
+    print("[Decompress] Loading context model from payload...")
+    context_model = _load_model(bytes(payload["context_model_data"]))
+
+    # ─ Step 3: rebuild encoded_sentences (for context stream only) ────────
+    print("[Decompress] Rebuilding context stream from metadata...")
     encoded_sentences = _build_encoded_sentences(payload)
 
-    # ─ Step 3: re-train context model ──────────────────────────────────
-    print("[Decompress] Re-training context model...")
-    context_model = ContextMixingModel()
-    context_model.train(encoded_sentences)
-
-    # ─ Step 4: decode char bitstream ───────────────────────────────────
+    # ─ Step 4: decode char bitstream ──────────────────────────────────────
     print("[Decompress] Arithmetic decoding char stream...")
-    num_symbols = int(payload["num_symbols"])
-    dec         = ArithmeticDecoder()
+    num_symbols  = int(payload["num_symbols"])
+    dec          = ArithmeticDecoder()
     char_classes = dec.decode(
         bytes(payload["compressed_bitstream"]),
         context_model,
@@ -233,7 +240,7 @@ def decompress(input_path: str) -> str:
         num_symbols,
     )
 
-    # ─ Step 5: decode pos-delta bitstream ──────────────────────────────
+    # ─ Step 5: decode pos-delta bitstream ─────────────────────────────────
     pos_delta_counts = unpack_deltas_counts(
         bytes(payload["packed_pos_deltas_counts"])
     )
@@ -244,14 +251,13 @@ def decompress(input_path: str) -> str:
         pos_deltas_count,
     )
 
-    # ─ Step 6: reconstruct text ─────────────────────────────────────────
+    # ─ Step 6: reconstruct text ───────────────────────────────────────────
     sentence_char_counts = unpack_u8_list(
         bytes(payload["packed_sentence_char_counts"])
     )
     char_stream = _reconstruct_chars(char_classes, pos_deltas, sentence_char_counts)
     roots       = _split_roots(char_stream)
 
-    # morph codes for apply_morph
     mc_data, mc_bits   = payload["packed_morph_codes"]
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
     morph_codes_flat   = [c for sent in morph_codes_nested for c in sent]
@@ -263,7 +269,7 @@ def decompress(input_path: str) -> str:
     result = _join_words(words)
     result = result[0].upper() + result[1:] if result else result
 
-    # ─ Step 7: discourse decode + autocorrect ───────────────────────────
+    # ─ Step 7: discourse decode + autocorrect ─────────────────────────────
     if symbol_table:
         result = decode_symbols(result, symbol_table)
 

@@ -1,8 +1,8 @@
 """Lexis-R compressor.
 
-Writes a self-contained .lexisr msgpack file. The context model is
-omitted from the payload; at decompress time it is re-trained from
-the stored structural metadata (pos_tags, morph_codes, root_lengths).
+Writes a self-contained .lexisr msgpack file.  The trained
+ContextMixingModel is serialised directly into the payload so the
+decompressor can load it byte-for-exact-byte — no re-training needed.
 
 Usage
 -----
@@ -12,6 +12,7 @@ Usage
 
 from __future__ import annotations
 
+import io
 from collections import Counter
 from pathlib import Path
 from typing import Any, cast, Dict, List
@@ -19,7 +20,6 @@ from typing import Any, cast, Dict, List
 import msgpack
 
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
-from compression.config import CHAR_CONTEXT_SIZE
 from compression.pipeline.stage1_normalize import normalize_text
 from compression.pipeline.stage2_morphology import MorphologicalAnalyser
 from compression.pipeline.stage3_syntax import analyse_sentence
@@ -28,7 +28,7 @@ from compression.pipeline.stage5_discourse_symbols import encode_symbols
 from compression.pipeline.stage5_encode import CharacterEncoder, StructuralEncoder
 from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.utils import chunk_text
-from lexis_r.arithmetic import ArithmeticEncoder, build_context_stream
+from lexis_r.arithmetic import ArithmeticEncoder
 from lexis_r.payload import (
     pack_deltas_counts,
     pack_huffman_bits,
@@ -47,7 +47,7 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# spaCy loader (identical to main.py helper)
+# spaCy loader
 # ---------------------------------------------------------------------------
 
 def _get_nlp(model: str | None = None):
@@ -87,7 +87,7 @@ def _encode_sentences(
     pos_sentences: list[list[str]] = []
 
     for i, chunk in enumerate(chunks):
-        doc  = nlp(chunk)
+        doc   = nlp(chunk)
         sents = list(doc.sents)
         for sent in tqdm(sents, desc=f"Chunk {i+1}/{len(chunks)}", unit="sent"):
             syntax     = analyse_sentence(sent)
@@ -110,6 +110,18 @@ def _encode_sentences(
     return encoded, freq_table
 
 
+def _serialise_model(model: ContextMixingModel) -> bytes:
+    """Serialise a trained ContextMixingModel to raw bytes (via temp file)."""
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".lcm", delete=False) as tf:
+        tmp_path = tf.name
+    try:
+        model.serialise(tmp_path)
+        return Path(tmp_path).read_bytes()
+    finally:
+        os.unlink(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # Public compress function
 # ---------------------------------------------------------------------------
@@ -122,18 +134,18 @@ def compress(
     """
     Compress text into a Lexis-R .lexisr file.
 
-    The context model is NOT stored in the payload — it will be
-    re-trained from structural metadata at decompress time.
+    The trained ContextMixingModel is serialised and stored verbatim
+    in the payload so the decompressor can load it exactly.
 
     Returns a dict of compression statistics.
     """
-    # ─ Stage 1: normalise ─────────────────────────────────────────────────
+    # ─ Stage 1: normalise ──────────────────────────────────────────────────
     normalized = normalize_text(text)
 
-    # ─ Stage 4+5: discourse + symbol encoding ────────────────────────────
+    # ─ Stage 4+5: discourse + symbol encoding ──────────────────────────────
     print("[Stage 4+5] Running discourse analysis...")
-    disc_analyser             = DiscourseAnalyser(use_spacy=True)
-    stage4_result             = disc_analyser.analyse_document(normalized)
+    disc_analyser = DiscourseAnalyser(use_spacy=True)
+    stage4_result = disc_analyser.analyse_document(normalized)
     discourse_compressed, symbol_table = encode_symbols(normalized, stage4_result)
     orig_len = len(normalized)
     disc_len = len(discourse_compressed)
@@ -142,22 +154,23 @@ def compress(
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    # ─ Stages 2-5: morphology + syntax + character encoding ───────────────
+    # ─ Stages 2-5: morphology + syntax + character encoding ────────────────
     encoded_sentences, pos_freq_table = _encode_sentences(normalized, model=model)
 
-    # ─ Stage 6: train context model (used only for encoding) ─────────────
+    # ─ Stage 6: train context model ────────────────────────────────────────
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
+    model_bytes = _serialise_model(context_model)   # <── stored in payload
 
-    # ─ Gather per-sentence streams ──────────────────────────────────────
-    char_classes:          List[int]        = []
-    char_pos_deltas:       List[int]        = []
-    sentence_char_counts:  List[int]        = []
-    pos_huffman_bits_list: List[float]      = []
-    pos_n_tags_list:       List[int]        = []
-    pos_tags_nested:       List[List[str]]  = []
-    morph_codes_nested:    List[List[int]]  = []
-    root_lengths_nested:   List[List[int]]  = []
+    # ─ Gather per-sentence streams ─────────────────────────────────────────
+    char_classes:          List[int]       = []
+    char_pos_deltas:       List[int]       = []
+    sentence_char_counts:  List[int]       = []
+    pos_huffman_bits_list: List[float]     = []
+    pos_n_tags_list:       List[int]       = []
+    pos_tags_nested:       List[List[str]] = []
+    morph_codes_nested:    List[List[int]] = []
+    root_lengths_nested:   List[List[int]] = []
 
     for sent in encoded_sentences:
         cc = sent.get("char_classes", [])
@@ -170,19 +183,19 @@ def compress(
         morph_codes_nested.append(sent.get("morph_codes", []))
         root_lengths_nested.append([len(r) for r in sent.get("roots", [])])
 
-    # ─ Stage 7: arithmetic encode char stream ────────────────────────────
+    # ─ Stage 7: arithmetic encode char stream ──────────────────────────────
     print("[Stage 7] Arithmetic encoding...")
     enc              = ArithmeticEncoder()
     compressed_bytes = enc.encode(char_classes, context_model, encoded_sentences)
 
-    # ─ Encode pos-delta stream separately ──────────────────────────────
+    # ─ Encode pos-delta stream with its own unigram coder ──────────────────
     pos_delta_counts = Counter(char_pos_deltas)
     pos_delta_bytes  = enc.encode_unigram_counts(
         char_pos_deltas,
         {int(k): int(v) for k, v in pos_delta_counts.items()},
     )
 
-    # ─ Pack all metadata ─────────────────────────────────────────────────
+    # ─ Pack structural metadata ────────────────────────────────────────────
     pt_data, pt_bits = pack_pos_tags(pos_tags_nested)
     mc_data, mc_bits = pack_token_array(morph_codes_nested, 4)
     rl_vlq           = pack_root_lengths(root_lengths_nested)
@@ -190,6 +203,7 @@ def compress(
     payload: Dict[str, Any] = {
         "lexis_variant":               "reconstructed",
         "symbol_table":                symbol_table,
+        "context_model_data":          model_bytes,     # <── serialised model
         "compressed_bitstream":        compressed_bytes,
         "pos_deltas_bitstream":        pos_delta_bytes,
         "packed_pos_deltas_counts":    pack_deltas_counts(
@@ -201,7 +215,7 @@ def compress(
         "packed_pos_n_tags":           pack_u8_list(pos_n_tags_list),
         "packed_pos_tags":             (pt_data, pt_bits),
         "packed_morph_codes":          (mc_data, mc_bits),
-        "packed_root_lengths_vlq":     rl_vlq,           # VLQ — no clamping
+        "packed_root_lengths_vlq":     rl_vlq,
         "packed_pos_freq_table":       pack_pos_freq_table(pos_freq_table),
         "num_symbols":                 len(char_classes),
     }
