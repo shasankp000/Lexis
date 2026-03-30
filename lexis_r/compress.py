@@ -24,6 +24,7 @@ import msgpack
 from compression.alphabet.phonetic_map import PHONETIC_CLASSES
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
 from compression.pipeline.stage1_normalize import normalize_text
+from compression.pipeline.stage1b_word_subs import encode_word_subs, merge_symbol_tables
 from compression.pipeline.stage2_morphology import MorphologicalAnalyser
 from compression.pipeline.stage3_syntax import analyse_sentence
 from compression.pipeline.stage4_discourse import DiscourseAnalyser
@@ -165,10 +166,17 @@ def compress(
 ) -> Dict[str, Any]:
     normalized = normalize_text(text)
 
+    # Stage 1b: substitute high-frequency words before morphological analysis
+    print("[Stage 1b] Frequency-based word substitution...")
+    normalized, word_table = encode_word_subs(normalized)
+    if word_table:
+        print(f"[Stage 1b] Substituted {len(word_table)} word types -> "
+              f"{sum(normalized.count(sym) for sym in word_table)} tokens replaced")
+
     print("[Stage 4+5] Running discourse analysis...")
     disc_analyser = DiscourseAnalyser(use_spacy=True)
     stage4_result = disc_analyser.analyse_document(normalized)
-    discourse_compressed, symbol_table = encode_symbols(normalized, stage4_result)
+    discourse_compressed, entity_table = encode_symbols(normalized, stage4_result)
     orig_len = len(normalized)
     disc_len = len(discourse_compressed)
     print(
@@ -176,7 +184,10 @@ def compress(
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    encoded_sentences, pos_freq_table = _encode_sentences(normalized, model=model)
+    # Merge entity + word substitution tables for payload
+    symbol_table = merge_symbol_tables(entity_table, word_table)
+
+    encoded_sentences, pos_freq_table = _encode_sentences(discourse_compressed, model=model)
 
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
@@ -231,10 +242,8 @@ def compress(
     lz77_pos_bytes = pack_pos_tags_lz77(pos_tags_nested, POS_TO_IDX)
     print(f"[Stage 7] pos_tags: {lz77_n_tokens} tokens -> {len(lz77_pos_bytes)} bytes")
 
-    # root_lengths: Huffman over flat raw values (entropy=2.9 bpb, 17 unique)
-    # delta+zigzag+VLQ was storing at ~9.3 bits/value; raw Huffman wins decisively
     rl_flat   = [l for sent in root_lengths_nested for l in sent]
-    rl_counts = [len(sent) for sent in root_lengths_nested]   # per-sentence token counts
+    rl_counts = [len(sent) for sent in root_lengths_nested]
     rl_huff_table, rl_huff_stream = huffman.encode(rl_flat)
     print(
         f"[Stage 7] root_lengths: {len(rl_flat)} values -> "
