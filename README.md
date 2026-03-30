@@ -1,8 +1,8 @@
 # Lexis
 
-A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf)
+A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
-Lexis achieves **2.7494 bpb on FineWeb with zero training data**, outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure — phonetic classification, morphological coding, syntactic tree encoding, coreference resolution, and online context adaptation.
+Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, main branch), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure. The experimental **Lexis-R branch** (reconstructive variant) reaches **10.01 bpb full-payload / 2.23 bpb char-stream** on Moby Dick at 5k chars with 98.6% case-insensitive word overlap.
 
 > *"How much of the compressibility of English comes from its linguistic structure alone, versus from statistical regularities in training data?"*
 >
@@ -10,18 +10,43 @@ Lexis achieves **2.7494 bpb on FineWeb with zero training data**, outperforming 
 
 ---
 
+## Branches
+
+| Branch | Variant | Reconstruction | Primary metric |
+|---|---|---|---|
+| `main` | **Lexis-E** | Exact (byte-level) | 2.7494 bpb on FineWeb |
+| `lexis-r` | **Lexis-R** | Semantic (root-form) | 10.01 bpb payload / 2.23 bpb char-stream |
+
+---
+
 ## Benchmark Results
+
+### Lexis-E (main) — FineWeb
 
 | System | bpb on web text | Notes |
 |---|---|---|
 | Uncompressed UTF-8 | 8.00 | Baseline |
 | gzip level 9 | ≈3.50 | General-purpose |
 | zstd level 19 | ≈3.00 | General-purpose |
-| **Lexis (no training data)** | **2.7494** | All stages active |
+| **Lexis-E (no training data)** | **2.7494** | All stages active |
 | cmix | ≈2.00 | Classical context mixing, CPU-only |
 | GPT-2 (1.5B params) | ≈1.30 | Trained on WebText |
 
 *Evaluated on 50 FineWeb samples × 10k chars, all pipeline stages active. Best single document: **2.6805 bpb** (10k chars, 17 discourse symbols).*
+
+### Lexis-R (lexis-r branch) — Moby Dick 5k chars
+
+| Metric | Value |
+|---|---|
+| char-stream bpb | **2.23** |
+| full-payload bpb | **10.01** |
+| payload size | 6,291 bytes |
+| case-insensitive word overlap | **98.6%** |
+| leaked § tokens | 0 |
+| compress time | ~15.6 s |
+| decompress time | ~0.54 s |
+
+*Scale test (5k–100k chars) in progress. Results will be added once complete.*
 
 ---
 
@@ -33,6 +58,10 @@ Lexis compresses text through an 8-stage pipeline that progressively strips ling
 Raw Text
    ↓
 [Stage 1]  Normalization          — sentence boundaries, whitespace, UTF-8
+   ↓
+[Stage 1b] Word Substitution      — frequency-based §W tokens, net-saving guard
+   ↓
+[Stage 1c] Symbol Slot Extraction — §E/§W tokens stripped, char offsets recorded
    ↓
 [Stage 2]  Morphological Analysis — root + transformation codes (15.1% char reduction)
    ↓
@@ -51,13 +80,17 @@ Raw Text
 
 ### Key Technical Contributions
 
-**Mixed-radix phonetic decomposition** — Characters are decomposed into (phonetic class, position, morphological role) triples rather than flat IDs. This reduces character-level delta magnitude by **2.42×** on real text, making the transition graph far more compressible.
+**Mixed-radix phonetic decomposition** — Characters are decomposed into (phonetic class, position, morphological role) triples rather than flat IDs. This reduces character-level delta magnitude by **2.42×** on real text.
 
-**Online context adaptation** — Stage 6 trains only on the document being compressed, from scratch, in real time. No offline corpus needed. Demonstrates that linguistic inductive bias can substitute for statistical training data.
+**Online context adaptation** — Stage 6 trains only on the document being compressed, in real time. No offline corpus needed.
 
-**Discourse threshold effect** — Stage 4 coreference substitution is net-negative below ~800 bytes and net-positive above ~2,000 bytes, with increasing benefit on longer documents. The pipeline adapts accordingly.
+**Symbol slot extraction (Stage 1c)** — `§E`/`§W` discourse tokens are stripped before encoding and spliced back after decoding using anchor-based char-offset interpolation. Zero char-stream overhead; zero leaked tokens.
 
-**Factoriadic delta encoding** — Symbol deltas are encoded in the factorial number system, giving compact representations for the small, frequent steps that dominate linguistically-constrained symbol sequences.
+**Anchor-based splice** — Instead of a single linear scale, `splice_symbols` builds anchor points every 200 clean chars snapped to space boundaries, then interpolates between the nearest pair. Eliminates positional drift at 10k+ chars.
+
+**Discourse threshold effect** — Stage 4 coreference substitution is net-negative below ~800 bytes and increasingly beneficial above ~2,000 bytes.
+
+**Factoriadic delta encoding** — Symbol deltas encoded in the factorial number system; compact for the small, frequent steps that dominate linguistically-constrained sequences.
 
 ---
 
@@ -98,21 +131,43 @@ pytest compression/tests -v  # all 25 tests should pass
 ## Usage
 
 ```bash
-# Full compression and decompression round-trip
+# Lexis-E: full compression and decompression round-trip
 python test_round_trip_pipeline.py
 
-# FineWeb benchmark
+# Lexis-R: compress and decompress
+python -c "
+from lexis_r.compress import compress
+from lexis_r.decompress import decompress
+compress(open('input.txt').read(), 'output.lexisr')
+print(decompress('output.lexisr'))
+"
+
+# FineWeb benchmark (Lexis-E)
 python benchmark.py <input_text_file>
+
+# Scale test (Lexis-R)
+python -c "
+import json, re, os
+from lexis_r.compress import compress
+from lexis_r.decompress import decompress
+os.makedirs('scale_test_results', exist_ok=True)
+for size in [5000, 10000, 20000, 50000, 100000]:
+    text = open('moby_dick.txt').read().lstrip('\ufeff')[:size]
+    compress(text, f'/tmp/moby_r_{size}.lexisr')
+    restored = decompress(f'/tmp/moby_r_{size}.lexisr')
+    print(f'{size}: {len(restored)} chars restored')
+"
 ```
 
 ---
 
 ## Notes
 
-- **Semantic fidelity over byte-exact reconstruction** — Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries (e.g. `sentence. "` → `sentence."`). These do not affect meaning, information content, or bpb measurement.
+- **Semantic fidelity over byte-exact reconstruction (Lexis-R)** — Lexis-R encodes root forms; inflected forms are reconstructed via lemminflect. Capitalisation of non-entity proper nouns is lost (fix pending: capitalisation bitmap).
+- **Semantic fidelity over byte-exact reconstruction (Lexis-E)** — Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
 - **IDE import warnings** — your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if not launched from inside the virtual environment. This is a false positive.
-- **GPU usage** — Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 rANS encoding runs on CPU; it is not the pipeline bottleneck.
-- **transformers version patch** — `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`. See installation notes in `research_discussion.md`.
+- **GPU usage** — Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 rANS encoding runs on CPU.
+- **transformers version patch** — `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`.
 
 ---
 
@@ -120,14 +175,14 @@ python benchmark.py <input_text_file>
 
 Lexis started as a research point of interest for the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) — specifically the non-record track, which invites submissions that push the infinite frontier of parameter-limited performance without the 16MB / 10-minute constraint.
 
-It has since grown into a standalone research system with its own identity and benchmark results.
+It has since grown into a standalone research system with two active variants (Lexis-E and Lexis-R) and its own benchmark results.
 
 ---
 
 ## Current Test Corpus
 
-- Moby Dick (Project Gutenberg) — round-trip validated at 10,000 and 25,000 characters
-- FineWeb (HuggingFaceFW/fineweb, sample-10BT) — 50 samples × 10k chars, benchmarked
+- **Moby Dick** (Project Gutenberg) — round-trip validated at 5k, 10k, 25k chars (Lexis-E); 5k chars benchmarked (Lexis-R); scale test 5k–100k in progress
+- **FineWeb** (HuggingFaceFW/fineweb, sample-10BT) — 50 samples × 10k chars, benchmarked (Lexis-E)
 
 ---
 
@@ -141,3 +196,6 @@ It has since grown into a standalone research system with its own identity and b
 - Longformer — [Beltagy et al. 2020](https://arxiv.org/abs/2004.05150)
 - FineWeb dataset — [HuggingFaceFW/fineweb](https://huggingface.co/datasets/HuggingFaceFW/fineweb)
 - Neural scaling laws — [Kaplan et al. 2020](https://arxiv.org/abs/2001.08361)
+- lemminflect — morphological inflection for Python
+- msgpack — binary serialisation
+- zstd — Zstandard compression, level 19 outer wrapper
