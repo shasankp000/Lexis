@@ -122,7 +122,9 @@ Decoding inverts each stage in reverse order. The rANS decoder reconstructs the 
 
 ### 4.1 Methodology
 
-**Dataset.** Evaluation is performed on documents sampled from the `HuggingFaceFW/fineweb` dataset (sample-10BT, train split), a large-scale filtered crawl of English web text. Documents are sampled using reservoir sampling with seed 42 and 20× oversampling to ensure diversity across document length and topic. Each document is truncated to a maximum of 10,000 characters.
+**Validation corpus.** Prior to FineWeb benchmarking, the full pipeline was validated for round-trip correctness on *Moby Dick* by Herman Melville, sourced from Project Gutenberg. Round-trip tests were conducted at 10,000 and 25,000 characters, verifying that the decode path reconstructs the original text with semantic fidelity across a long-form literary document with varied vocabulary, complex sentence structure, and named entity density. This corpus was chosen specifically because its length, stylistic variety, and high density of recurring named entities (the Pequod, Moby Dick, Ahab, Nantucket) stress-tests the discourse analysis and coreference resolution stages in ways that short web documents cannot.
+
+**Benchmark dataset.** Compression quality is evaluated on documents sampled from the `HuggingFaceFW/fineweb` dataset (sample-10BT, train split), a large-scale filtered crawl of English web text. Documents are sampled using reservoir sampling with seed 42 and 20× oversampling to ensure diversity across document length and topic. Each document is truncated to a maximum of 10,000 characters.
 
 **Metric.** Compression quality is measured in bits per byte (bpb), defined as:
 
@@ -130,7 +132,7 @@ Decoding inverts each stage in reverse order. The rANS decoder reconstructs the 
 bpb = (compressed_bitstream_size_in_bytes × 8) / original_document_size_in_bytes
 ```
 
-where `original_document_size_in_bytes` is the UTF-8 byte length of the input document after Stage 1 normalisation, and `compressed_bitstream_size_in_bytes` is the size of the Stage 7 character-stream rANS output. Lower bpb indicates better compression.
+where `original_document_size_in_bytes` is the UTF-8 byte length of the input document after Stage 1 normalisation, and `compressed_bitstream_size_in_bytes` is the size of the Stage 7 arithmetic-coded character-stream output. Lower bpb indicates better compression.
 
 **Baselines.** Lexis is compared against general-purpose compressors (gzip level 9, zstd level 19) and reference neural systems (GPT-2 1.5B, GPT-4 class). General-purpose compressor bpb values on web text are taken from established benchmarks; neural system values are from Deletang et al. (2023).
 
