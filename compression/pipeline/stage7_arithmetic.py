@@ -8,6 +8,14 @@ from typing import Dict, List, Tuple
 
 from compression.config import CHAR_CONTEXT_SIZE
 
+# Fixed precision for float-probability -> integer-count conversion.
+# Both encoder and decoder use this constant, so CDF tables are identical.
+_PRECISION = 1 << 16  # 65536
+
+
+# ---------------------------------------------------------------------------
+# Bit I/O
+# ---------------------------------------------------------------------------
 
 class _BitWriter:
     def __init__(self) -> None:
@@ -52,6 +60,63 @@ class _BitReader:
         return bit
 
 
+# ---------------------------------------------------------------------------
+# CDF helpers
+# ---------------------------------------------------------------------------
+
+def _build_cdf(
+    distribution: Dict[int, float]
+) -> Tuple[List[int], List[int], int]:
+    """
+    Convert a float probability distribution into an integer CDF.
+
+    Returns (symbols, cumulative, total) where:
+      - symbols[i] is the i-th symbol in sorted order
+      - cumulative[i] is the cumulative count *before* symbol i
+      - cumulative[i+1] is the cumulative count *after* symbol i
+      - total = cumulative[-1]
+
+    Each symbol gets at least 1 count unit, so no zero-width interval.
+    The mapping is deterministic given only the distribution dict, so
+    encoder and decoder always produce identical tables.
+    """
+    if not distribution:
+        return [0], [0, _PRECISION], _PRECISION
+
+    prob_sum = sum(distribution.values())
+    if prob_sum <= 0:
+        prob_sum = 1.0
+
+    symbols = sorted(distribution.keys())
+    counts = [max(1, round(distribution[s] / prob_sum * _PRECISION)) for s in symbols]
+
+    cumulative = [0]
+    for c in counts:
+        cumulative.append(cumulative[-1] + c)
+    total = cumulative[-1]
+
+    return symbols, cumulative, total
+
+
+def _build_cumulative_counts(
+    counts: Dict[int, int],
+) -> Tuple[List[int], List[int], int]:
+    if not counts:
+        return [0], [0, 1], 1
+    symbols = sorted(counts.keys())
+    cumulative = [0]
+    running = 0
+    for sym in symbols:
+        running += max(int(counts[sym]), 0)
+        cumulative.append(running)
+    total = cumulative[-1] if cumulative[-1] > 0 else 1
+    return symbols, cumulative, total
+
+
+# ---------------------------------------------------------------------------
+# Encoder
+# ---------------------------------------------------------------------------
+
 class ArithmeticEncoder:
     """Encodes symbol streams into a compressed bitstream using arithmetic coding."""
 
@@ -74,10 +139,8 @@ class ArithmeticEncoder:
         encoded_sentences: List[Dict],
     ) -> bytes:
         """Encode char_classes stream into compressed bytes."""
-        morph_stream, pos_stream, struct_probs = _build_context_stream(
-            encoded_sentences
-        )
-        char_history = deque(maxlen=CHAR_CONTEXT_SIZE)
+        morph_stream, pos_stream, struct_probs = _build_context_stream(encoded_sentences)
+        char_history: deque = deque(maxlen=CHAR_CONTEXT_SIZE)
 
         length = min(len(char_classes), len(morph_stream), len(pos_stream))
         for idx in range(length):
@@ -99,10 +162,7 @@ class ArithmeticEncoder:
         self, symbols: List[int], distribution: Dict[int, float]
     ) -> bytes:
         """Encode a symbol stream using a fixed unigram distribution."""
-        self.low = 0
-        self.high = (1 << 32) - 1
-        self.pending = 0
-        self.writer = _BitWriter()
+        self._reset()
         for symbol in symbols:
             self._encode_symbol(int(symbol), distribution)
         self._finalize()
@@ -112,43 +172,42 @@ class ArithmeticEncoder:
         self, symbols: List[int], counts: Dict[int, int]
     ) -> bytes:
         """Encode a symbol stream using integer unigram counts."""
-        self.low = 0
-        self.high = (1 << 32) - 1
-        self.pending = 0
-        self.writer = _BitWriter()
+        self._reset()
         symbols_sorted, cumulative, total = _build_cumulative_counts(counts)
         symbol_to_index = {sym: idx for idx, sym in enumerate(symbols_sorted)}
         for symbol in symbols:
             idx = symbol_to_index.get(int(symbol))
             if idx is None:
                 raise ValueError(f"Symbol {symbol} missing from counts.")
-            low_sym = cumulative[idx]
+            low_sym  = cumulative[idx]
             high_sym = cumulative[idx + 1]
             range_width = self.high - self.low + 1
-            low_new = self.low + (range_width * low_sym) // total
+            low_new  = self.low + (range_width * low_sym)  // total
             high_new = self.low + (range_width * high_sym) // total - 1
-            self.low = low_new
+            self.low  = low_new
             self.high = max(high_new, self.low)
             self._renormalize()
         self._finalize()
         return self.writer.get_bytes()
 
-    def _encode_symbol(self, symbol: int, distribution: Dict[int, float]) -> None:
-        symbols, cumulative = _build_cumulative_int(distribution, self.high - self.low + 1)
-        if symbol not in symbols:
-            raise ValueError(f"Symbol {symbol} missing from distribution.")
+    def _reset(self) -> None:
+        self.low = 0
+        self.high = (1 << 32) - 1
+        self.pending = 0
+        self.writer = _BitWriter()
 
-        idx = symbols.index(symbol)
+    def _encode_symbol(self, symbol: int, distribution: Dict[int, float]) -> None:
+        syms, cumulative, total = _build_cdf(distribution)
+        if symbol not in syms:
+            raise ValueError(f"Symbol {symbol} missing from distribution.")
+        idx = syms.index(symbol)
         low_sym  = cumulative[idx]
         high_sym = cumulative[idx + 1]
-
         range_width = self.high - self.low + 1
-        low_new  = self.low + low_sym
-        high_new = self.low + high_sym - 1
-
-        self.low  = low_new
-        self.high = max(high_new, self.low)
-
+        self.low  = self.low + (range_width * low_sym)  // total
+        self.high = self.low + (range_width * (high_sym - low_sym)) // total - 1
+        if self.high < self.low:
+            self.high = self.low
         self._renormalize()
 
     def _output_bit(self, bit: int) -> None:
@@ -183,6 +242,10 @@ class ArithmeticEncoder:
         self.writer.flush()
 
 
+# ---------------------------------------------------------------------------
+# Decoder
+# ---------------------------------------------------------------------------
+
 class ArithmeticDecoder:
     """Decodes arithmetic-coded bitstreams back to symbol streams."""
 
@@ -204,17 +267,9 @@ class ArithmeticDecoder:
         encoded_sentences: List[Dict],
         num_symbols: int,
     ) -> List[int]:
-        self.reader = _BitReader(compressed_bytes)
-        self.value  = 0
-        self.low    = 0
-        self.high   = (1 << 32) - 1
-        for _ in range(32):
-            self.value = (self.value << 1) | self._read_bit()
-
-        morph_stream, pos_stream, struct_probs = _build_context_stream(
-            encoded_sentences
-        )
-        char_history = deque(maxlen=CHAR_CONTEXT_SIZE)
+        self._init_reader(compressed_bytes)
+        morph_stream, pos_stream, struct_probs = _build_context_stream(encoded_sentences)
+        char_history: deque = deque(maxlen=CHAR_CONTEXT_SIZE)
         decoded: List[int] = []
 
         length = min(num_symbols, len(morph_stream), len(pos_stream))
@@ -236,12 +291,7 @@ class ArithmeticDecoder:
         self, compressed_bytes: bytes, distribution: Dict[int, float], num_symbols: int
     ) -> List[int]:
         """Decode a symbol stream using a fixed unigram distribution."""
-        self.reader = _BitReader(compressed_bytes)
-        self.value  = 0
-        self.low    = 0
-        self.high   = (1 << 32) - 1
-        for _ in range(32):
-            self.value = (self.value << 1) | self._read_bit()
+        self._init_reader(compressed_bytes)
         decoded: List[int] = []
         for _ in range(num_symbols):
             symbol = self._decode_symbol(distribution)
@@ -252,13 +302,7 @@ class ArithmeticDecoder:
         self, compressed_bytes: bytes, counts: Dict[int, int], num_symbols: int
     ) -> List[int]:
         """Decode a symbol stream using integer unigram counts."""
-        self.reader = _BitReader(compressed_bytes)
-        self.value  = 0
-        self.low    = 0
-        self.high   = (1 << 32) - 1
-        for _ in range(32):
-            self.value = (self.value << 1) | self._read_bit()
-
+        self._init_reader(compressed_bytes)
         symbols_sorted, cumulative, total = _build_cumulative_counts(counts)
         decoded: List[int] = []
         for _ in range(num_symbols):
@@ -276,38 +320,48 @@ class ArithmeticDecoder:
             decoded.append(symbol)
         return decoded
 
+    def _init_reader(self, data: bytes) -> None:
+        self.reader = _BitReader(data)
+        self.value  = 0
+        self.low    = 0
+        self.high   = (1 << 32) - 1
+        for _ in range(32):
+            self.value = (self.value << 1) | self._read_bit()
+
     def _decode_symbol(self, distribution: Dict[int, float]) -> int:
         """
-        Decode one symbol using the same integer arithmetic as _encode_symbol.
+        Decode one symbol using identical integer arithmetic to _encode_symbol.
 
-        Both encoder and decoder now compute CDF intervals as:
-            low_int  = int(range_width * float_cumulative[i])
-            high_int = int(range_width * float_cumulative[i+1])
-        so the interval boundaries are identical on both sides.
+        Both use _build_cdf() -> (syms, cumulative, total) and then
+        compute interval boundaries as (range_width * cum) // total.
         """
+        syms, cumulative, total = _build_cdf(distribution)
         range_width = self.high - self.low + 1
-        symbols, cumulative = _build_cumulative_int(distribution, range_width)
 
-        # scaled_value is the encoder's offset into [0, range_width)
-        scaled_value = self.value - self.low
+        # Find which CDF bucket the current value falls into.
+        # The encoder used: low_new = low + (range_width * low_sym) // total
+        # So we need the bucket i where:
+        #   (range_width * cum[i]) // total  <=  value - low
+        #   (range_width * cum[i+1]) // total > value - low
+        scaled = self.value - self.low
 
-        # Find the symbol whose integer interval contains scaled_value.
-        # cumulative[i] <= scaled_value < cumulative[i+1]
-        symbol   = symbols[-1]
-        low_sym  = cumulative[-2]
-        high_sym = cumulative[-1]
-        for idx in range(len(symbols)):
-            if scaled_value < cumulative[idx + 1]:
-                symbol   = symbols[idx]
-                low_sym  = cumulative[idx]
-                high_sym = cumulative[idx + 1]
-                break
+        # Convert scaled back to CDF space for bisect:
+        # We want largest i such that (range_width * cumulative[i]) // total <= scaled
+        # Equivalently: cumulative[i] <= (scaled * total) // range_width
+        # Use bisect_right on the mapped cumulative values.
+        cdf_scaled = [(range_width * c) // total for c in cumulative]
 
-        low_new  = self.low + low_sym
-        high_new = self.low + high_sym - 1
+        idx = max(bisect_right(cdf_scaled, scaled) - 1, 0)
+        idx = min(idx, len(syms) - 1)
 
-        self.low  = low_new
-        self.high = max(high_new, self.low)
+        symbol   = syms[idx]
+        low_sym  = cumulative[idx]
+        high_sym = cumulative[idx + 1]
+
+        self.low  = self.low + (range_width * low_sym)  // total
+        self.high = self.low + (range_width * (high_sym - low_sym)) // total - 1
+        if self.high < self.low:
+            self.high = self.low
 
         self._renormalize()
         return symbol
@@ -336,8 +390,14 @@ class ArithmeticDecoder:
         return self.reader.read_bit()
 
 
-def _build_cumulative(distribution: Dict[int, float]) -> Tuple[List[int], List[float]]:
-    """Build a float CDF — kept for any legacy callers."""
+# ---------------------------------------------------------------------------
+# Legacy float CDF (kept for any external callers)
+# ---------------------------------------------------------------------------
+
+def _build_cumulative(
+    distribution: Dict[int, float]
+) -> Tuple[List[int], List[float]]:
+    """Build a float CDF — kept for legacy callers only."""
     if not distribution:
         return [0], [0.0, 1.0]
     total = sum(distribution.values())
@@ -353,65 +413,18 @@ def _build_cumulative(distribution: Dict[int, float]) -> Tuple[List[int], List[f
     return symbols, cumulative
 
 
+# kept as alias so any code importing _build_cumulative_int still works
 def _build_cumulative_int(
     distribution: Dict[int, float], range_width: int
 ) -> Tuple[List[int], List[int]]:
-    """
-    Build an integer CDF scaled to range_width.
-
-    cumulative[i]   = int(range_width * float_prob_up_to_i)
-    cumulative[i+1] = int(range_width * float_prob_up_to_i+1)
-
-    This is the exact same arithmetic used in _encode_symbol so
-    encoder and decoder always agree on interval boundaries.
-    Each symbol is guaranteed at least 1 unit of probability mass
-    so no symbol ever has a zero-width interval.
-    """
-    if not distribution:
-        return [0], [0, range_width]
-    total = sum(distribution.values())
-    if total <= 0:
-        total = 1.0
-    symbols = sorted(distribution.keys())
-    n = len(symbols)
-
-    # Build float cumulative first
-    float_cum = [0.0]
-    running = 0.0
-    for sym in symbols:
-        running += distribution[sym] / total
-        float_cum.append(min(running, 1.0))
-    float_cum[-1] = 1.0
-
-    # Convert to integers
-    int_cum = [int(range_width * p) for p in float_cum]
-    int_cum[-1] = range_width  # guarantee last boundary == range_width exactly
-
-    # Ensure every symbol has at least width 1 (prevents zero-width intervals)
-    for i in range(n):
-        if int_cum[i + 1] <= int_cum[i]:
-            int_cum[i + 1] = int_cum[i] + 1
-    # Re-clamp the last boundary (may have grown beyond range_width)
-    if int_cum[-1] > range_width:
-        int_cum[-1] = range_width
-
-    return symbols, int_cum
+    syms, cum, total = _build_cdf(distribution)
+    scaled = [(range_width * c) // total for c in cum]
+    return syms, scaled
 
 
-def _build_cumulative_counts(
-    counts: Dict[int, int],
-) -> Tuple[List[int], List[int], int]:
-    if not counts:
-        return [0], [0, 1], 1
-    symbols = sorted(counts.keys())
-    cumulative = [0]
-    running = 0
-    for sym in symbols:
-        running += max(int(counts[sym]), 0)
-        cumulative.append(running)
-    total = cumulative[-1] if cumulative[-1] > 0 else 1
-    return symbols, cumulative, total
-
+# ---------------------------------------------------------------------------
+# Context stream builder
+# ---------------------------------------------------------------------------
 
 def _build_context_stream(
     encoded_sentences: List[Dict],
