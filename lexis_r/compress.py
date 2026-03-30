@@ -1,8 +1,9 @@
 """Lexis-R compressor.
 
-Writes a self-contained .lexisr msgpack file.  The trained
-ContextMixingModel is serialised directly into the payload so the
-decompressor can load it byte-for-exact-byte — no re-training needed.
+Writes a self-contained .lexisr msgpack file, post-compressed with zstd
+level 19.  The trained ContextMixingModel is serialised directly into
+the payload (zlib-compressed) so the decompressor can load it without
+re-training.
 
 Usage
 -----
@@ -41,6 +42,7 @@ from lexis_r.payload import (
     pack_token_array,
     pack_u8_list,
 )
+from lexis_r.zstd_wrap import compress_payload, is_zstd
 
 try:
     from tqdm import tqdm  # type: ignore
@@ -271,20 +273,30 @@ def compress(
 
     packed       = msgpack.packb(payload, use_bin_type=True)
     packed_bytes = cast(bytes, packed)
-    Path(output_path).write_bytes(packed_bytes)
+
+    print("[Stage 8] zstd compressing payload (level=19)...")
+    final_bytes = compress_payload(packed_bytes, level=19)
+    print(
+        f"[Stage 8] msgpack payload: {len(packed_bytes)} -> "
+        f"{len(final_bytes)} bytes "
+        f"({100*(len(packed_bytes)-len(final_bytes))/len(packed_bytes):.1f}% reduction)"
+    )
+
+    Path(output_path).write_bytes(final_bytes)
 
     original_size   = len(text.encode("utf-8"))
     compressed_size = len(compressed_bytes)
     print(f"[Lexis-R] Wrote {output_path}")
     print(f"[Lexis-R] char-stream bpb  : {compressed_size * 8 / original_size:.4f}")
-    print(f"[Lexis-R] full-payload bpb : {len(packed_bytes) * 8 / original_size:.4f}")
-    print(f"[Lexis-R] payload size     : {len(packed_bytes)} bytes")
+    print(f"[Lexis-R] full-payload bpb : {len(final_bytes) * 8 / original_size:.4f}")
+    print(f"[Lexis-R] payload size     : {len(final_bytes)} bytes")
 
     return {
-        "original_size":    original_size,
-        "compressed_size":  compressed_size,
-        "payload_size":     len(packed_bytes),
-        "bpb":              compressed_size * 8 / original_size if original_size else 0.0,
-        "full_payload_bpb": len(packed_bytes) * 8 / original_size if original_size else 0.0,
-        "discourse_symbols": len(symbol_table),
+        "original_size":      original_size,
+        "compressed_size":    compressed_size,
+        "msgpack_size":       len(packed_bytes),
+        "payload_size":       len(final_bytes),
+        "bpb":                compressed_size * 8 / original_size if original_size else 0.0,
+        "full_payload_bpb":   len(final_bytes) * 8 / original_size if original_size else 0.0,
+        "discourse_symbols":  len(symbol_table),
     }

@@ -1,8 +1,10 @@
 """Lexis-R decompressor.
 
-Reads a .lexisr msgpack file, loads the serialised ContextMixingModel
-directly from the payload (no re-training), then arithmetic-decodes
+Reads a .lexisr file (zstd-wrapped msgpack), loads the serialised
+ContextMixingModel directly from the payload, then arithmetic-decodes
 the char stream back to text.
+
+Auto-detects zstd magic so old plain-msgpack .lexisr files still load.
 
 Usage
 -----
@@ -35,6 +37,7 @@ from lexis_r.payload import (
     unpack_token_array,
     unpack_u8_list,
 )
+from lexis_r.zstd_wrap import decompress_payload, is_zstd
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +247,12 @@ def _join_words(words: List[str]) -> str:
 
 def decompress(input_path: str) -> str:
     raw: bytes = Path(input_path).read_bytes()
+
+    # Auto-detect zstd wrapper
+    if is_zstd(raw):
+        print("[Decompress] Detected zstd wrapper, decompressing...")
+        raw = decompress_payload(raw)
+
     payload: Dict[str, Any] = msgpack.unpackb(raw, raw=False, strict_map_key=False)
 
     symbol_table: dict = payload.get("symbol_table", {})
