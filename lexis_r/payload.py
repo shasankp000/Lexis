@@ -7,13 +7,13 @@ packing, which would silently clamp roots longer than 15 characters.
 Layout summary
 --------------
   pos_tags              LZ77 pointer encoded (token-level, cross-sentence)
-  morph_codes           RLE: 0x00+run for zero runs, 0x01+code for non-zero
+  morph_codes           RLE: run(len,val) for any repeated value, lit(val) for singles
   root_lengths          delta + zigzag + base-128 VLQ
   char/morph_context    flat VLQ bytes, row-major, no keys
   struct_context        flat VLQ bytes + zlib
   pos_huffman_bits      base-128 VLQ per value scaled x100  (1B count prefix)
-  pos_n_tags            uint8 list (1B count + 1B/sentence)  [almost always <256]
-  sentence_char_counts  uint8 list (1B count + 1B/sentence)  [almost always <256]
+  pos_n_tags            uint8 list (1B count + 1B/sentence)
+  sentence_char_counts  uint8 list (1B count + 1B/sentence)
   pos_freq_table        base-256 VLQ per tag, fixed _POS_VOCAB order
   pos_deltas_counts     1B n_pairs + zigzag base-128 VLQ (delta, count) pairs
   model_weights         3 x float32 big-endian
@@ -26,7 +26,7 @@ Encoding selection rationale
   base-256 VLQ : best for values 256+ that are rarely small (e.g. freq counts)
   uint8        : best when values are provably < 256 (sentence lengths, n_tags)
   delta+zigzag : best when consecutive values are correlated (root_lengths)
-  RLE          : best when one value dominates long runs (morph_codes ~85% zero)
+  RLE          : best for any repeated-value runs (morph_codes per character)
   LZ77         : best when short repeated sequences exist (pos_tags patterns)
 
 All helpers are pure functions: bytes in, bytes/value out.
@@ -159,23 +159,24 @@ def unpack_pos_tags(data: bytes, n_bits: int) -> List[List[str]]:
 
 
 # ===========================================================================
-# morph_codes  — RLE encoding
+# morph_codes  — generalised RLE encoding
 #
-# Morph code 0 (BASE form) accounts for >85% of tokens in English prose.
-# Consecutive zero runs are encoded as a single (0x00, run_length) pair.
-# Non-zero codes are emitted as individual (0x01, morph_code) literals.
+# morph_codes are stored per-character (not per-token): each token of
+# length L repeats the same code L times, plus sentinel positions get 0.
+# This creates long runs of identical values ideal for RLE.
 #
 # Wire format:
 #   vlq(n_sentences)
 #   per sentence:
 #     1B n_tokens
-#     sequence of 2B pairs until n_tokens values are covered:
-#       0x00  run_len   <- zero run of run_len tokens
-#       0x01  code      <- single non-zero token (code 1-12)
+#     sequence of opcodes until n_tokens values covered:
+#       0x00  run_len  value   <- run of run_len identical values (run >= 2)
+#       0x01  value           <- single value (no run)
 #
-# Worst case: all non-zero -> 2B/token (vs 0.5B/token for 4-bit pack).
-# Best case:  all zero     -> 2B total per sentence regardless of length.
-# Typical:    ~85% zero    -> ~0.35B/token  (vs 0.5B for 4-bit pack).
+# Break-even: run of 2 -> 3B vs 2x2B=4B (saves 1B)
+#             run of L -> 3B vs Lx2B    (saves 2L-3 bytes)
+# Worst case (all singles, all different): 2B/token = same as before.
+# Typical: words of avg length 5 -> 3B/word vs 10B -> ~70% reduction.
 # ===========================================================================
 
 def pack_morph_codes_rle(sentences: List[List[int]]) -> bytes:
@@ -185,15 +186,15 @@ def pack_morph_codes_rle(sentences: List[List[int]]) -> bytes:
         i = 0
         n = len(sent)
         while i < n:
-            if sent[i] == 0:
-                run = 0
-                while i + run < n and sent[i + run] == 0 and run < 255:
-                    run += 1
-                out += bytes([0x00, run])
-                i += run
+            val = sent[i]
+            run = 1
+            while i + run < n and sent[i + run] == val and run < 255:
+                run += 1
+            if run >= 2:
+                out += bytes([0x00, run, val])
             else:
-                out += bytes([0x01, sent[i]])
-                i += 1
+                out += bytes([0x01, val])
+            i += run
     return bytes(out)
 
 
@@ -206,10 +207,12 @@ def unpack_morph_codes_rle(data: bytes) -> List[List[int]]:
         tokens: List[int] = []
         while len(tokens) < n_tokens:
             flag = data[offset]; offset += 1
-            val  = data[offset]; offset += 1
             if flag == 0x00:
-                tokens.extend([0] * val)
-            else:
+                run = data[offset]; offset += 1
+                val = data[offset]; offset += 1
+                tokens.extend([val] * run)
+            else:  # 0x01
+                val = data[offset]; offset += 1
                 tokens.append(val)
         sentences.append(tokens)
     return sentences
