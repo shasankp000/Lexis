@@ -24,9 +24,9 @@ from compression.alphabet.phonetic_map import PHONETIC_CLASSES
 from compression.pipeline.stage5_discourse_symbols import decode_symbols
 from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.stage9_autocorrect import autocorrect
+from lexis_r import huffman
 from lexis_r.arithmetic import ArithmeticDecoder
 from lexis_r.payload import (
-    unpack_deltas_counts,
     unpack_huffman_bits,
     unpack_root_lengths,
     unpack_token_array,
@@ -34,12 +34,18 @@ from lexis_r.payload import (
 )
 
 
+# sentinel absolute positions in the phonetic map
+_SENTINEL_POS = {
+    PHONETIC_CLASSES["^"][1],   # pos = 0
+    PHONETIC_CLASSES["$"][1],   # pos = 1
+}
+
+
 # ---------------------------------------------------------------------------
 # Context model loader
 # ---------------------------------------------------------------------------
 
 def _load_model(model_bytes: bytes) -> ContextMixingModel:
-    """Load a ContextMixingModel from raw bytes (written by compress.py)."""
     with tempfile.NamedTemporaryFile(suffix=".lcm", delete=False) as tf:
         tf.write(model_bytes)
         tmp_path = tf.name
@@ -52,15 +58,10 @@ def _load_model(model_bytes: bytes) -> ContextMixingModel:
 
 
 # ---------------------------------------------------------------------------
-# encoded_sentences rebuilder  (used only for build_context_stream)
+# encoded_sentences rebuilder
 # ---------------------------------------------------------------------------
 
 def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
-    """
-    Rebuild the per-symbol context stream lists from packed metadata.
-    These are only used by ArithmeticDecoder.decode() via
-    build_context_stream() — not for model training.
-    """
     from lexis_r.payload import unpack_pos_tags
 
     pt_data, pt_bits   = payload["packed_pos_tags"]
@@ -87,12 +88,12 @@ def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
         for tok_idx, length in enumerate(lengths):
             pos_tag    = sent_pos[tok_idx]   if tok_idx < len(sent_pos)   else "X"
             morph_code = sent_morph[tok_idx] if tok_idx < len(sent_morph) else 0
-            char_pos_tags.append("X");      char_morph_codes.append(0)            # ^ marker
+            char_pos_tags.append("X");      char_morph_codes.append(0)
             char_pos_tags.extend([pos_tag]      * length)
             char_morph_codes.extend([morph_code] * length)
-            char_pos_tags.append("X");      char_morph_codes.append(0)            # $ marker
+            char_pos_tags.append("X");      char_morph_codes.append(0)
             if tok_idx < len(lengths) - 1:
-                char_pos_tags.append("X"); char_morph_codes.append(0)            # _ space
+                char_pos_tags.append("X"); char_morph_codes.append(0)
 
         encoded.append({
             "char_pos_tags":    char_pos_tags,
@@ -104,6 +105,62 @@ def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
         })
 
     return encoded
+
+
+# ---------------------------------------------------------------------------
+# Sentinel reconstruction
+# ---------------------------------------------------------------------------
+
+def _reconstruct_sentinel_deltas(
+    content_deltas: List[int],
+    sentence_char_counts: List[int],
+    root_lengths_nested: List[List[int]],
+) -> List[int]:
+    """
+    Re-insert ^/$ sentinel deltas at their correct positions.
+
+    The phonetic coordinates are:
+      ^  → (6, 0)   absolute pos = 0
+      $  → (6, 1)   absolute pos = 1
+      _  → punctuation class, not a sentinel here
+
+    We rebuild the full delta stream by computing the absolute position
+    at each index, inserting the correct sentinel delta where a ^/$ marker
+    belongs, and consuming content_deltas for all other positions.
+    """
+    full: List[int] = []
+    content_iter = iter(content_deltas)
+    prev_abs_pos: int | None = None
+
+    for s_idx, count in enumerate(sentence_char_counts):
+        lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
+        # reconstruct per-token layout
+        layout: List[bool] = []   # True = sentinel position
+        sentinel_abs: List[int] = []  # absolute pos value at each position
+
+        for t_idx, length in enumerate(lengths):
+            layout.append(True);  sentinel_abs.append(0)   # ^ at (6,0)
+            for _ in range(length):
+                layout.append(False); sentinel_abs.append(-1)
+            layout.append(True);  sentinel_abs.append(1)   # $ at (6,1)
+            if t_idx < len(lengths) - 1:
+                layout.append(False); sentinel_abs.append(-1)  # _ space
+
+        for is_sent, abs_pos_if_sent in zip(layout, sentinel_abs):
+            if is_sent:
+                target_abs = abs_pos_if_sent
+                delta = target_abs if prev_abs_pos is None else target_abs - prev_abs_pos
+                full.append(delta)
+                prev_abs_pos = target_abs
+            else:
+                delta = next(content_iter, 0)
+                if prev_abs_pos is None:
+                    prev_abs_pos = delta
+                else:
+                    prev_abs_pos = prev_abs_pos + delta
+                full.append(delta)
+
+    return full
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +181,7 @@ def _reconstruct_chars(
     pos_deltas:           List[int],
     sentence_char_counts: List[int],
 ) -> str:
+    from compression.alphabet.phonetic_map import PHONETIC_CLASSES
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     chars: List[str] = []
     idx = 0
@@ -204,32 +262,20 @@ def _join_words(words: List[str]) -> str:
 # ---------------------------------------------------------------------------
 
 def decompress(input_path: str) -> str:
-    """
-    Decompress a Lexis-R .lexisr file back to text.
-
-    Steps:
-      1. Unpack msgpack payload.
-      2. Load ContextMixingModel directly from payload bytes.
-      3. Rebuild encoded_sentences for build_context_stream.
-      4. Arithmetic-decode char bitstream.
-      5. Decode pos-delta bitstream.
-      6. Reconstruct char stream → roots → words → text.
-      7. Re-expand discourse symbols and autocorrect.
-    """
     raw: bytes = Path(input_path).read_bytes()
     payload: Dict[str, Any] = msgpack.unpackb(raw, raw=False, strict_map_key=False)
 
     symbol_table: dict = payload.get("symbol_table", {})
 
-    # ─ Step 2: load exact trained model ───────────────────────────────────
+    # ─ Load model
     print("[Decompress] Loading context model from payload...")
     context_model = _load_model(bytes(payload["context_model_data"]))
 
-    # ─ Step 3: rebuild encoded_sentences (for context stream only) ────────
+    # ─ Rebuild encoded_sentences
     print("[Decompress] Rebuilding context stream from metadata...")
     encoded_sentences = _build_encoded_sentences(payload)
 
-    # ─ Step 4: decode char bitstream ──────────────────────────────────────
+    # ─ Decode char bitstream
     print("[Decompress] Arithmetic decoding char stream...")
     num_symbols  = int(payload["num_symbols"])
     dec          = ArithmeticDecoder()
@@ -240,21 +286,27 @@ def decompress(input_path: str) -> str:
         num_symbols,
     )
 
-    # ─ Step 5: decode pos-delta bitstream ─────────────────────────────────
-    pos_delta_counts = unpack_deltas_counts(
-        bytes(payload["packed_pos_deltas_counts"])
-    )
-    pos_deltas_count = int(payload["pos_deltas_count"])
-    pos_deltas = ArithmeticDecoder().decode_unigram_counts(
-        bytes(payload["pos_deltas_bitstream"]),
-        pos_delta_counts,
-        pos_deltas_count,
+    # ─ Decode pos_deltas (Huffman, sentinel-stripped)
+    print("[Decompress] Huffman decoding pos_deltas...")
+    content_count  = int(payload["pos_deltas_content_count"])
+    content_deltas = huffman.decode(
+        bytes(payload["pos_deltas_huffman_table"]),
+        bytes(payload["pos_deltas_huffman_stream"]),
+        content_count,
     )
 
-    # ─ Step 6: reconstruct text ───────────────────────────────────────────
+    # ─ Reconstruct full pos_deltas with sentinels
     sentence_char_counts = unpack_u8_list(
         bytes(payload["packed_sentence_char_counts"])
     )
+    root_lengths_nested = unpack_root_lengths(
+        bytes(payload["packed_root_lengths_vlq"])
+    )
+    pos_deltas = _reconstruct_sentinel_deltas(
+        content_deltas, sentence_char_counts, root_lengths_nested
+    )
+
+    # ─ Reconstruct text
     char_stream = _reconstruct_chars(char_classes, pos_deltas, sentence_char_counts)
     roots       = _split_roots(char_stream)
 
@@ -269,7 +321,7 @@ def decompress(input_path: str) -> str:
     result = _join_words(words)
     result = result[0].upper() + result[1:] if result else result
 
-    # ─ Step 7: discourse decode + autocorrect ─────────────────────────────
+    # ─ Discourse decode + autocorrect
     if symbol_table:
         result = decode_symbols(result, symbol_table)
 

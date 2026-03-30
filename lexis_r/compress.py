@@ -12,13 +12,15 @@ Usage
 
 from __future__ import annotations
 
-import io
+import os
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, cast, Dict, List
 
 import msgpack
 
+from compression.alphabet.phonetic_map import PHONETIC_CLASSES
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
 from compression.pipeline.stage1_normalize import normalize_text
 from compression.pipeline.stage2_morphology import MorphologicalAnalyser
@@ -29,8 +31,8 @@ from compression.pipeline.stage5_encode import CharacterEncoder, StructuralEncod
 from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.utils import chunk_text
 from lexis_r.arithmetic import ArithmeticEncoder
+from lexis_r import huffman
 from lexis_r.payload import (
-    pack_deltas_counts,
     pack_huffman_bits,
     pack_pos_freq_table,
     pack_pos_tags,
@@ -44,6 +46,13 @@ try:
 except ImportError:
     def tqdm(it, **kw):  # type: ignore
         return it
+
+
+# sentinel coordinates in the phonetic map
+_SENTINEL_COORDS = {
+    PHONETIC_CLASSES["^"],   # (6, 0) word-start
+    PHONETIC_CLASSES["$"],   # (6, 1) word-end
+}
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +84,6 @@ def _get_nlp(model: str | None = None):
 def _encode_sentences(
     text: str, model: str | None = None
 ) -> tuple[list[dict], dict[str, int]]:
-    """Run stages 2-5 and return (encoded_sentences, pos_freq_table)."""
     nlp            = _get_nlp(model)
     analyser       = MorphologicalAnalyser(use_spacy=True, model_name=model)
     sym_alphabet   = SymbolAlphabet()
@@ -111,8 +119,6 @@ def _encode_sentences(
 
 
 def _serialise_model(model: ContextMixingModel) -> bytes:
-    """Serialise a trained ContextMixingModel to raw bytes (via temp file)."""
-    import tempfile, os
     with tempfile.NamedTemporaryFile(suffix=".lcm", delete=False) as tf:
         tmp_path = tf.name
     try:
@@ -120,6 +126,70 @@ def _serialise_model(model: ContextMixingModel) -> bytes:
         return Path(tmp_path).read_bytes()
     finally:
         os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Sentinel stripping
+# ---------------------------------------------------------------------------
+
+def _is_sentinel_index(
+    idx: int,
+    sentence_char_counts: List[int],
+    root_lengths_nested: List[List[int]],
+) -> bool:
+    """
+    Return True if global char index idx corresponds to a ^/$ marker.
+
+    We know the char stream layout per sentence:
+      for each token of length L:
+        ^ (1)  +  L chars  +  $ (1)  [+  _ space (1) if not last token]
+    Markers are at the ^ and $ positions.
+    """
+    offset = 0
+    for s_idx, count in enumerate(sentence_char_counts):
+        if idx < offset + count:
+            local = idx - offset
+            lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
+            pos = 0
+            for t_idx, length in enumerate(lengths):
+                # ^ marker
+                if local == pos:
+                    return True
+                pos += 1
+                # root chars
+                pos += length
+                # $ marker
+                if local == pos:
+                    return True
+                pos += 1
+                # _ space (not after last token)
+                if t_idx < len(lengths) - 1:
+                    pos += 1
+            return False
+        offset += count
+    return False
+
+
+def _strip_sentinel_deltas(
+    char_pos_deltas: List[int],
+    sentence_char_counts: List[int],
+    root_lengths_nested: List[List[int]],
+) -> tuple[List[int], List[int]]:
+    """
+    Split pos_deltas into:
+      - content_deltas: only the non-sentinel positions
+      - sentinel_indices: global indices of sentinel positions (for reconstruction)
+
+    Returns (content_deltas, sentinel_indices).
+    """
+    content: List[int] = []
+    sentinel_indices: List[int] = []
+    for i, delta in enumerate(char_pos_deltas):
+        if _is_sentinel_index(i, sentence_char_counts, root_lengths_nested):
+            sentinel_indices.append(i)
+        else:
+            content.append(delta)
+    return content, sentinel_indices
 
 
 # ---------------------------------------------------------------------------
@@ -131,18 +201,10 @@ def compress(
     output_path: str,
     model: str | None = None,
 ) -> Dict[str, Any]:
-    """
-    Compress text into a Lexis-R .lexisr file.
-
-    The trained ContextMixingModel is serialised and stored verbatim
-    in the payload so the decompressor can load it exactly.
-
-    Returns a dict of compression statistics.
-    """
-    # ─ Stage 1: normalise ──────────────────────────────────────────────────
+    # ─ Stage 1: normalise
     normalized = normalize_text(text)
 
-    # ─ Stage 4+5: discourse + symbol encoding ──────────────────────────────
+    # ─ Stage 4+5: discourse
     print("[Stage 4+5] Running discourse analysis...")
     disc_analyser = DiscourseAnalyser(use_spacy=True)
     stage4_result = disc_analyser.analyse_document(normalized)
@@ -154,15 +216,15 @@ def compress(
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    # ─ Stages 2-5: morphology + syntax + character encoding ────────────────
+    # ─ Stages 2–5: morphology + syntax + character encoding
     encoded_sentences, pos_freq_table = _encode_sentences(normalized, model=model)
 
-    # ─ Stage 6: train context model ────────────────────────────────────────
+    # ─ Stage 6: train context model
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
-    model_bytes = _serialise_model(context_model)   # <── stored in payload
+    model_bytes = _serialise_model(context_model)
 
-    # ─ Gather per-sentence streams ─────────────────────────────────────────
+    # ─ Gather per-sentence streams
     char_classes:          List[int]       = []
     char_pos_deltas:       List[int]       = []
     sentence_char_counts:  List[int]       = []
@@ -183,19 +245,24 @@ def compress(
         morph_codes_nested.append(sent.get("morph_codes", []))
         root_lengths_nested.append([len(r) for r in sent.get("roots", [])])
 
-    # ─ Stage 7: arithmetic encode char stream ──────────────────────────────
-    print("[Stage 7] Arithmetic encoding...")
+    # ─ Strip sentinel deltas (^/$) before encoding pos_deltas
+    print("[Stage 7] Stripping sentinel deltas...")
+    content_deltas, sentinel_indices = _strip_sentinel_deltas(
+        char_pos_deltas, sentence_char_counts, root_lengths_nested
+    )
+    print(f"[Stage 7] pos_deltas: {len(char_pos_deltas)} → {len(content_deltas)} "
+          f"(stripped {len(sentinel_indices)} sentinels)")
+
+    # ─ Stage 7: arithmetic encode char stream
+    print("[Stage 7] Arithmetic encoding char stream...")
     enc              = ArithmeticEncoder()
     compressed_bytes = enc.encode(char_classes, context_model, encoded_sentences)
 
-    # ─ Encode pos-delta stream with its own unigram coder ──────────────────
-    pos_delta_counts = Counter(char_pos_deltas)
-    pos_delta_bytes  = enc.encode_unigram_counts(
-        char_pos_deltas,
-        {int(k): int(v) for k, v in pos_delta_counts.items()},
-    )
+    # ─ Zigzag + canonical Huffman encode stripped pos_deltas
+    print("[Stage 7] Huffman encoding pos_deltas...")
+    huff_table_bytes, huff_bitstream = huffman.encode(content_deltas)
 
-    # ─ Pack structural metadata ────────────────────────────────────────────
+    # ─ Pack structural metadata
     pt_data, pt_bits = pack_pos_tags(pos_tags_nested)
     mc_data, mc_bits = pack_token_array(morph_codes_nested, 4)
     rl_vlq           = pack_root_lengths(root_lengths_nested)
@@ -203,13 +270,14 @@ def compress(
     payload: Dict[str, Any] = {
         "lexis_variant":               "reconstructed",
         "symbol_table":                symbol_table,
-        "context_model_data":          model_bytes,     # <── serialised model
+        "context_model_data":          model_bytes,
         "compressed_bitstream":        compressed_bytes,
-        "pos_deltas_bitstream":        pos_delta_bytes,
-        "packed_pos_deltas_counts":    pack_deltas_counts(
-            {int(k): int(v) for k, v in pos_delta_counts.items()}
-        ),
-        "pos_deltas_count":            len(char_pos_deltas),
+        # pos_deltas — sentinel-stripped, zigzag+Huffman coded
+        "pos_deltas_huffman_table":    huff_table_bytes,
+        "pos_deltas_huffman_stream":   huff_bitstream,
+        "pos_deltas_content_count":    len(content_deltas),
+        "pos_deltas_total_count":      len(char_pos_deltas),
+        # structural metadata
         "packed_sentence_char_counts": pack_u8_list(sentence_char_counts),
         "packed_pos_huffman_bits":     pack_huffman_bits(pos_huffman_bits_list),
         "packed_pos_n_tags":           pack_u8_list(pos_n_tags_list),
