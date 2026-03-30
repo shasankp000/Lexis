@@ -2,7 +2,7 @@
 ## Research Discussion Document
 **Status:** Work in Progress  
 **Started:** March 2026  
-**Last Updated:** March 29, 2026
+**Last Updated:** March 31, 2026
 
 ---
 
@@ -350,29 +350,21 @@ On *"the old man walked slowly home and the tired dog ran quickly away"*:
 
 #### Run A — 50 samples, 5k chars, Stage 4 inactive
 
-*Stage 4 was blocked by `fastcoref`/`huggingface-hub>=1.0` conflict — subsequently resolved by patching `transformers/dependency_versions_table.py`.*
-
 | Metric | Value |
 |---|---|
 | Overall bpb | **2.7587** |
 | Avg bpb | 2.8076 ± 0.0842 |
 | Min / Max bpb | 2.6815 / 2.9827 |
-| Total original | 103,447 bytes |
-| Total compressed | 35,672 bytes |
-| Eval time | 88.2s (~1.76s/sample) |
 
-#### Run B — 50 samples, 10k chars, Stage 4 active 🔖 Primary benchmark
+#### Run B — 50 samples, 10k chars, Stage 4 active 🔖 Primary Lexis-E benchmark
 
 | Metric | Value |
 |---|---|
 | Overall bpb | **2.7494** |
 | Avg bpb | 2.8065 ± 0.0856 |
 | Min / Max bpb | 2.6754 / 2.9827 |
-| Total original | 116,836 bytes |
-| Total compressed | 40,154 bytes |
-| Eval time | 198.0s (~3.96s/sample) |
 | Discourse active | Yes — 38/50 samples had ≥1 symbol |
-| Best single sample | 2.6805 bpb (10,052 bytes, 17 symbols, 2.03% reduction) |
+| Best single sample | 2.6805 bpb (10,052 bytes, 17 symbols) |
 
 #### Contextual comparison
 | System | bpb on web text | Notes |
@@ -380,44 +372,122 @@ On *"the old man walked slowly home and the tired dog ran quickly away"*:
 | Uncompressed UTF-8 | 8.00 | Baseline |
 | gzip level 9 | ~3.50 | General-purpose |
 | zstd level 19 | ~3.00 | General-purpose |
-| **Lexis (no training, Run B)** | **2.75** | All stages active |
+| **Lexis-E (no training, Run B)** | **2.75** | All stages active |
 | cmix | ~2.00 | Classical context mixing, CPU-only |
 | GPT-2 (1.5B params) | ~1.30 | Trained on WebText |
 | GPT-4 class | ~0.90 | Trained on internet-scale data |
 
-#### Key findings
+---
 
-**Finding 1: Linguistic priors alone beat general-purpose compressors.**
-With zero training data, Lexis achieves 2.75 bpb — outperforming gzip (3.5) and zstd (3.0) purely through phonetic classification, morphological coding, and online context adaptation.
+## 9. Lexis-R Branch — Reconstructive Variant
 
-**Finding 2: Online adaptation is sufficient.**
-Stage 6 trains only on the document being compressed, from scratch. This demonstrates the "in-context learning is compression" principle at the character level.
+### 9.1 Motivation
 
-**Finding 3: Stability across domains.**
-±0.085 std across 50 heterogeneous FineWeb documents of varying topic, length, and style. The pipeline generalises without overfitting.
+Lexis-E (the main branch) targets **exact byte-level reconstruction** of the original text. Lexis-R relaxes that constraint in favour of **semantic fidelity** — the output reads the same but is not required to be byte-identical. This unlocks two major optimisations:
 
-**Finding 4: bpb improves with document length.**
-Longer documents trend toward lower bpb — the online context model has more text to adapt to. Short docs (<500 bytes) cluster at 2.88–2.98 bpb; long docs (>5k bytes) cluster at 2.67–2.74 bpb.
+1. **Morphological root encoding** — only encode the root form of each word; the decoder reconstructs inflected forms via lemminflect. This shrinks the char stream significantly since root forms are shorter than inflected forms.
+2. **Symbol slot extraction** — `§E`/`§W` discourse substitution tokens cannot be phonetically encoded (the `§` character is outside PHONETIC_CLASSES). In Lexis-E these tokens leaked into the char stream as dead weight. In Lexis-R they are stripped entirely before encoding and spliced back after decoding with zero char-stream overhead.
 
-**Finding 5: Discourse stage exhibits a document-length threshold effect.**
-Stage 4 is **net-negative below ~800 bytes** — symbol table overhead costs more bits than the coreference substitution saves (samples 25, 28: reduction_pct = −0.17, −0.14). It becomes net-positive above ~2,000 bytes and increasingly beneficial above 5,000 bytes.
+### 9.2 Architecture
 
-| Discourse symbols | Avg bpb | Doc size range |
+Lexis-R lives in `lexis_r/` and shares the full pipeline (`compression/pipeline/`) with the main branch. The compressor and decompressor are standalone:
+
+```
+lexis_r/
+  compress.py       — full 8-stage compress → .lexisr file
+  decompress.py     — full reverse pipeline
+  arithmetic.py     — arithmetic encoder/decoder
+  huffman.py        — Huffman encoder/decoder
+  lz77_pos.py       — LZ77 POS tag stream encoder
+  payload.py        — all binary serialisation helpers
+  zstd_wrap.py      — zstd level-19 outer wrapper
+
+compression/pipeline/
+  stage1c_symbol_slots.py  — §-token extraction and anchor-based splice
+  stage1b_word_subs.py     — frequency-based word substitution guard
+  (all other stages shared)
+```
+
+### 9.3 Key Optimisations (in order of impact)
+
+#### Optimisation 1 — Symbol slot extraction (Stage 1c)
+**Principle:** never encode information in the char stream that will be stored separately anyway.
+
+`§E1`, `§W2`, `§R0` tokens from discourse and word substitution are stripped from the text before the char encoder sees them. Their positions in the clean text are recorded as `(char_offset, symbol)` pairs in `slot_map`. After decoding, `splice_symbols` maps these offsets back into the reconstructed string and re-inserts the tokens before `decode_symbols` restores originals.
+
+- **Char stream saving:** 432 chars removed at 5k input (10.9% of clean text)
+- **bpb impact:** eliminates all `§`-token overhead from arithmetic stream
+- **Payload cost:** `slot_map` + `slot_clean_len` (one int) ≈ 143 entries × ~5 B = ~715 B
+
+#### Optimisation 2 — Net-saving word substitution guard (Stage 1b)
+**Principle:** only apply a substitution if it provably saves bits in the payload.
+
+Every `§W` substitution replaces N chars with a 4-char token. Net saving = N − 4 chars. The guard `SLOT_OVERHEAD_CHARS` ensures a substitution is only applied if the net char saving exceeds the per-entry overhead of storing the symbol in `symbol_table` (roughly 20 chars/entry). Prevents low-frequency words from inflating the symbol table with no bpb gain.
+
+#### Optimisation 3 — `slot_clean_len` instead of `slot_clean_text`
+**Principle:** store the minimum information needed for reconstruction.
+
+An earlier version stored the full `clean_text` string in the payload as `slot_clean_text` so the decompressor could use its length for splice scaling. At 5k input, `clean_text` ≈ 4400 chars ≈ 4400 bytes in the payload — more than the compressed char stream itself. The fix: store only `len(clean_text)` as a single integer (`slot_clean_len`). The `splice_symbols` function only needs the ratio `len(joined) / clean_len`; it does not need the text itself. This removed ~1400 bytes from the final payload, recovering bpb from 13.47 → 10.01.
+
+#### Optimisation 4 — Anchor-based splice (Stage 1c)
+**Principle:** interpolate between known-good points rather than extrapolating from a single ratio.
+
+A single linear scale from `clean_len` to `len(joined)` drifts at 10k+ chars because `_join_words` compresses punctuation non-uniformly across the document. At 10k chars this caused word overlap to drop from ~98% to ~75%. The fix: build anchor points every `ANCHOR_STRIDE=200` clean chars, snapping each to the nearest space boundary in the joined string. `splice_symbols` then interpolates between the two nearest anchors for each symbol position. The anchor table is built entirely on-the-fly from `(slot_map, slot_clean_len, joined_text)` — zero extra payload bytes.
+
+#### Optimisation 5 — Sentinel delta stripping (Stage 7)
+**Principle:** don't encode known values.
+
+POS delta streams include sentinel deltas at sentence boundaries (always value 0 or 1 by construction). These are stripped before Huffman encoding and reconstructed from the `root_lengths` structure at decode time, saving 1930 bytes across 171 sentences at 5k input.
+
+#### Optimisation 6 — VLQ for all variable-length counts
+**Principle:** never cap a value at 255 when it might exceed 255 at scale.
+
+`pack_huffman_bits` and `pack_u8_list` originally used `bytes()` with uint8 values. At 20k+ chars, sentence-level Huffman costs exceed 255, causing `ValueError: bytes must be in range(0, 256)`. Both helpers were switched to base-128 VLQ, which handles unbounded values at 1 byte/value for 0–127 with graceful overflow.
+
+### 9.4 Results at 5,000 characters (Moby Dick)
+
+| Metric | Lexis-E baseline | Lexis-R |
 |---|---|---|
-| 0 (18 samples) | ~2.886 | <1,000 bytes |
-| 1–2 (19 samples) | ~2.820 | 500–3,000 bytes |
-| 3–6 (8 samples) | ~2.738 | 2,000–6,000 bytes |
-| 8–17 (5 samples) | ~2.700 | 7,000–10,000 bytes |
+| char-stream bpb | 2.67 | **2.23** |
+| full-payload bpb | 10.19 (est.) | **10.01** |
+| payload size | ~6405 B | **6291 B** |
+| case-insensitive word overlap | — | **98.6%** |
+| leaked § tokens | — | **0** |
+| compress time | — | ~15.6 s |
+| decompress time | — | ~0.54 s |
 
-**Finding 6: Peak result with all stages active.**
-Sample 29 (10,052 bytes, 17 discourse symbols, 2.03% text reduction): **2.6805 bpb** — the best single-document result. Demonstrates full pipeline potential on long-form text.
+### 9.5 Decompression verification
 
-**Finding 7: Answer to the core research question.**
-Linguistic structure alone accounts for roughly 2/3 of the gap between a naive byte compressor (gzip at 3.5 bpb) and a strong trained LM (GPT-2 at 1.3 bpb). Statistical learning from training data accounts for the remaining 1/3.
+- **0 leaked `§` tokens** in output — splice is clean
+- **98.6% case-insensitive alpha word overlap** on Moby Dick 5k chars
+- Remaining 1.4% gap: capitalisation loss (proper nouns not entity-substituted lose case), and possessive/punctuation edge cases in `_join_words` — both pre-existing bugs, not splice errors
+- Word count: 766/766 — perfect token count match
+
+### 9.6 Portability to Lexis-E
+
+The bpb gains are **partially portable**:
+- **Fully portable:** Stage 1b net-saving guard, Stage 1c `extract_symbols` / `splice_symbols`, `slot_clean_len` pattern
+- **Partially portable:** VLQ serialisation fixes apply to any scale test
+- **Architecture-specific:** the absolute char-stream bpb (2.23) reflects Lexis-R's reconstructive model (root-only encoding); Lexis-E encodes full inflected forms so its baseline is higher. The relative improvement from stripping `§` tokens will transfer but the absolute number will not.
+
+### 9.7 Scale test (in progress)
+
+Scale test currently running across 5k, 10k, 20k, 50k, 100k chars. Results will be added here when complete. JSONs written to `scale_test_results/`.
+
+Expected trends:
+- full-payload bpb should decrease with input size (fixed overhead amortises)
+- char-stream bpb may increase slightly (context model has more novel vocabulary at larger scales)
+- word overlap should hold at ~98%+ with anchor-based splice (vs ~75% degradation with naive linear scale)
+
+### 9.8 Known remaining issues
+
+1. **Capitalisation loss** — proper nouns not captured by entity substitution (e.g. `Project`, `Gutenberg`) lose initial capitalisation. Fix: store a 1-bit-per-token capitalisation bitmap (~121 bytes overhead at 5k chars).
+2. **Possessive/punctuation mangling** — `_join_words` incorrectly attaches punctuation in ~4 edge cases (`jeroboam's`, `sperm`, orphaned `'s`). Fix: audit `_join_words` attachment logic for apostrophe-s sequences.
+3. **Em-dash normalisation** — `—` → `--` from Stage 1 `normalize_text`. Intentional Unicode normalisation; affects word-diff metrics but not meaning.
 
 ---
 
-## 9. Open Research Questions
+## 10. Open Research Questions
 
 ### Resolved since last session
 - ✅ FineWeb bpb baseline: **2.7494** (50 samples, 10k chars, all stages active)
@@ -426,26 +496,31 @@ Linguistic structure alone accounts for roughly 2/3 of the gap between a naive b
 - ✅ Training-data-agnostic property confirmed
 - ✅ Stage 4+5 discourse round-trip on Moby Dick
 - ✅ UTF-8 BOM + `most→mosted` morphology bugs fixed
+- ✅ Lexis-R branch: char-stream bpb 2.67 → **2.23**, full-payload bpb **10.01** at 5k chars
+- ✅ Symbol slot extraction: 0 leaked `§` tokens, 98.6% case-insensitive word overlap
+- ✅ `slot_clean_text` → `slot_clean_len` payload bloat bug: removed ~1400 bytes
+- ✅ VLQ overflow fix for `pack_huffman_bits` / `pack_u8_list` at 20k+ chars
+- ✅ Anchor-based splice: eliminates scale drift in `splice_symbols` at 10k+ chars
 
 ### Still open
-- Full pipeline round-trip `Match: True` at 25k chars — single punctuation space edge case
+- Scale test results at 10k, 20k, 50k, 100k chars (running)
+- Capitalisation bitmap for Lexis-R (estimated +121 B overhead, ~1% overlap gain)
+- Possessive/punctuation fix in `_join_words`
+- Full pipeline round-trip `Match: True` at 25k chars — single punctuation space edge case (Lexis-E)
 - How to order structural symbol IDs for minimum sequential delta
-- Full formal design of the complete symbol alphabet across all layers
-- Whether the 2.42× phonetic improvement survives in the full pipeline
-- POS delta improvement on larger corpora
 - FineWeb bpb on truly long documents (50k+ chars) where discourse stage dominates
 - Discourse threshold: find exact crossover byte count empirically
-
-### Complex number / quaternion extension
-- Morphological role (4 values) — encode as flat 2-bit stream, not mixed into main delta
+- GPU ANS implementation
 
 ---
 
-## 10. Current Status by Stage
+## 11. Current Status by Stage
 
 | Stage | Status | Notes |
 |---|---|---|
 | Stage 1 — Normalization | ✅ Implemented | Handles whitespace, line endings, UTF-8 BOM; punctuation space edge case pending |
+| Stage 1b — Word Substitution | ✅ Implemented | Net-saving guard active; ~2–12 word types substituted at 5k–20k chars |
+| Stage 1c — Symbol Slots | ✅ Implemented | `extract_symbols` / `splice_symbols` with anchor-based interpolation |
 | Stage 2 — Morphology | ✅ Implemented + Patched | spaCy lemmatization + rule-based fallback; `_IDENTITY_WORDS` fix applied |
 | Stage 3 — Syntax/POS | ✅ Implemented | spaCy POS/dep, tree-shape serialization, sentence type/voice |
 | Stage 4 — Discourse | ✅ Fully Active | Longformer coreference; version conflict resolved; threshold effect documented |
@@ -453,20 +528,24 @@ Linguistic structure alone accounts for roughly 2/3 of the gap between a naive b
 | Stage 6 — Probability Model | ✅ Implemented | 3-level context mixing + bpb + serialisation |
 | Stage 7 — ANS/GPU Encoding | ✅ CPU rANS | Correct encode/decode; GPU acceleration pending |
 | Stage 8 — Decoding | ✅ Implemented | Full decode path + ANS stream reconstruction |
-| FineWeb eval (all stages) | ✅ Benchmarked | **2.7494 bpb**, 50 samples × 10k chars, ±0.086 std |
+| Lexis-E FineWeb eval | ✅ Benchmarked | **2.7494 bpb**, 50 samples × 10k chars, ±0.086 std |
+| Lexis-R 5k chars | ✅ Benchmarked | **10.01 bpb** full payload, **2.23 bpb** char stream, 98.6% overlap |
+| Lexis-R scale test | ⏳ Running | 5k–100k chars, results pending |
 
 ---
 
-## 11. Next Steps
+## 12. Next Steps
 
 ### Immediate
+1. **Scale test results** — plot bpb vs input size from `scale_test_results/*.json` for the paper
+2. **Capitalisation bitmap** — 1 bit/token, ~121 bytes at 5k, expected to push case-sensitive overlap to ~99%
+3. **Possessive/punctuation fix** in `_join_words`
+
+### Lexis-E track
 1. **Fix punctuation space edge case** — Stage 1 normalisation of `sentence. "word` vs `sentence." word`
 2. **Scale round-trip test** to 50k chars once punctuation fix applied
-3. **Discourse threshold experiment** — run eval at 20k, 50k chars to find exact crossover and peak bpb
-
-### Track B — Structural layer
-1. Evaluate structural streams on larger corpora
-2. Decide structural symbol ID ordering (fixed vs frequency-based)
+3. **Discourse threshold experiment** — run eval at 20k, 50k chars
+4. **Port Stage 1b/1c gains** from Lexis-R to Lexis-E
 
 ### System integration
 1. GPU ANS implementation or CUDA acceleration strategy
@@ -477,7 +556,7 @@ Local environment (Nobara Linux, RTX 3060 12GB, Ryzen 5 4600G, 16GB DDR4).
 
 ---
 
-## 12. References & Inspirations
+## 13. References & Inspirations
 
 - [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf)
 - [NanoGPT Speedrunning](https://github.com/KellerJordan/modded-nanogpt)
@@ -489,9 +568,13 @@ Local environment (Nobara Linux, RTX 3060 12GB, Ryzen 5 4600G, 16GB DDR4).
 - Factoriadic number system; Mixed-radix number systems
 - Longformer — [Beltagy et al. 2020](https://arxiv.org/abs/2004.05150) — Stage 4 coreference model
 - FineWeb dataset — [HuggingFaceFW/fineweb](https://huggingface.co/datasets/HuggingFaceFW/fineweb)
+- lemminflect — morphological inflection for Python
+- msgpack — binary serialisation
+- zstd — Zstandard compression, level 19 outer wrapper
 
 ---
 
-*Last updated: March 29, 2026. Session 4 complete.*  
-*Primary benchmark: **2.7494 bpb** on FineWeb (50 samples × 10k chars, all stages active).*  
-*Peak single-document: **2.6805 bpb** (10k chars, 17 discourse symbols).*
+*Last updated: March 31, 2026. Session 5 complete.*  
+*Lexis-E primary benchmark: **2.7494 bpb** on FineWeb (50 samples × 10k chars, all stages active).*  
+*Lexis-R at 5k chars: **10.01 bpb** full payload, **2.23 bpb** char stream, **98.6%** case-insensitive word overlap.*  
+*Scale test results pending — see `scale_test_results/` once complete.*
