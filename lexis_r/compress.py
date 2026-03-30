@@ -41,6 +41,7 @@ from lexis_r.payload import (
     pack_root_lengths,
     pack_token_array,
     pack_u8_list,
+    pack_vlq_list,
 )
 from lexis_r.zstd_wrap import compress_payload
 
@@ -178,7 +179,7 @@ def compress(
         morph_codes_nested.append(sent.get("morph_codes", []))
         root_lengths_nested.append([len(r) for r in sent.get("roots", [])])
 
-    # Flatten pos_deltas for Huffman encoding, store sentence lengths for reset
+    # Flatten pos_deltas for Huffman encoding; store per-sentence lengths for reset
     pos_deltas_flat    = [d for sent_d in pos_deltas_nested for d in sent_d]
     pos_deltas_lengths = [len(sent_d) for sent_d in pos_deltas_nested]
 
@@ -206,10 +207,10 @@ def compress(
         "pos_deltas_huffman_table":    huff_table_bytes,
         "pos_deltas_huffman_stream":   huff_bitstream,
         "pos_deltas_total_count":      len(pos_deltas_flat),
-        "pos_deltas_sentence_counts":  pack_u8_list(pos_deltas_lengths),
+        "pos_deltas_sentence_counts":  pack_vlq_list(pos_deltas_lengths),
         "packed_pos_tags_lz77":        lz77_pos_bytes,
         "pos_tags_token_count":        lz77_n_tokens,
-        "packed_sentence_char_counts": pack_u8_list(sentence_char_counts),
+        "packed_sentence_char_counts": pack_vlq_list(sentence_char_counts),
         "packed_pos_huffman_bits":     pack_huffman_bits(pos_huffman_bits_list),
         "packed_pos_n_tags":           pack_u8_list(pos_n_tags_list),
         "packed_morph_codes":          (mc_data, mc_bits),

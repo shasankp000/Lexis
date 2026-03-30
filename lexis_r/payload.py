@@ -11,11 +11,11 @@ Layout summary
   root_lengths          delta + zigzag + base-128 VLQ
   char/morph_context    flat VLQ bytes, row-major, no keys
   struct_context        flat VLQ bytes + zlib
-  pos_huffman_bits      uint8 list  (1B count + 1B/sentence, values already integers)
-  pos_n_tags            uint8 list (1B count + 1B/sentence)
-  sentence_char_counts  uint8 list (1B count + 1B/sentence)
+  pos_huffman_bits      uint8 list  (1B count + 1B/sentence, values always < 256)
+  pos_n_tags            uint8 list  (1B count + 1B/sentence, values always < 256)
+  sentence_char_counts  VLQ list    (can exceed 255 on long sentences)
+  pos_deltas_sentence_counts  VLQ list  (same reason)
   pos_freq_table        base-256 VLQ per tag, fixed _POS_VOCAB order
-  pos_deltas_counts     1B n_pairs + zigzag base-128 VLQ (delta, count) pairs
   model_weights         3 x float32 big-endian
   char/morph_vocab      uint8 flat (1B count + 1B/entry)
   pos_vocab             packed 5-bit ids
@@ -24,10 +24,9 @@ Encoding selection rationale
 -----------------------------
   base-128 VLQ : best for values with unbounded range; costs 1B for 0-127
   base-256 VLQ : best for values 256+ that are rarely small (e.g. freq counts)
-  uint8        : best when values are provably < 256 (sentence lengths, n_tags,
-                 pos_huffman_bits which are integer costs < 256)
+  uint8        : best when values are provably < 256 (n_tags, huffman_bits)
+  VLQ list     : best for per-sentence lengths that may exceed 255
   delta+zigzag : best when consecutive values are correlated (root_lengths)
-  RLE          : best for any repeated-value runs
   LZ77         : best when short repeated sequences exist (pos_tags patterns)
 
 All helpers are pure functions: bytes in, bytes/value out.
@@ -160,7 +159,6 @@ def unpack_pos_tags(data: bytes, n_bits: int) -> List[List[str]]:
 
 # ===========================================================================
 # morph_codes  — generalised RLE (kept for reference)
-# Production uses 4-bit pack_token_array.
 # ===========================================================================
 
 def pack_morph_codes_rle(sentences: List[List[int]]) -> bytes:
@@ -270,12 +268,7 @@ def unpack_context_matrix(data: bytes, row_keys: List, n_cols: int) -> Dict:
 
 # ===========================================================================
 # pos_huffman_bits  — plain uint8 list
-#
-# Values are sentence-level Huffman costs that arrive as floats but are
-# always integers in practice (e.g. 164.0, 131.0) and fit in a uint8.
-# x100 scaling was inflating 2-digit integers to 5-digit VLQ values;
-# storing them raw as uint8 (same layout as pos_n_tags) is optimal.
-#
+# Values are sentence-level Huffman costs always < 256.
 # Wire format:  1B n  |  n x uint8
 # ===========================================================================
 
@@ -290,7 +283,7 @@ def unpack_huffman_bits(data: bytes) -> List[float]:
 
 
 # ===========================================================================
-# uint8 lists  (pos_n_tags, sentence_char_counts)
+# uint8 lists  (pos_n_tags only — provably < 256)
 # ===========================================================================
 
 def pack_u8_list(values: List[int]) -> bytes:
@@ -301,6 +294,29 @@ def pack_u8_list(values: List[int]) -> bytes:
 def unpack_u8_list(data: bytes) -> List[int]:
     n = data[0]
     return list(data[1: n + 1])
+
+
+# ===========================================================================
+# VLQ lists  (sentence_char_counts, pos_deltas_sentence_counts)
+# Use when values may exceed 255 (long sentences).
+# Wire format:  VLQ(n)  |  n x VLQ(value)
+# ===========================================================================
+
+def pack_vlq_list(values: List[int]) -> bytes:
+    out = bytearray(_vlq_encode(len(values)))
+    for v in values:
+        out += _vlq_encode(v)
+    return bytes(out)
+
+
+def unpack_vlq_list(data: bytes) -> List[int]:
+    offset = 0
+    n, offset = _vlq_decode(data, offset)
+    result: List[int] = []
+    for _ in range(n):
+        v, offset = _vlq_decode(data, offset)
+        result.append(v)
+    return result
 
 
 # ===========================================================================

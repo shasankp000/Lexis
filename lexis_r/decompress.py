@@ -36,6 +36,7 @@ from lexis_r.payload import (
     unpack_root_lengths,
     unpack_token_array,
     unpack_u8_list,
+    unpack_vlq_list,
 )
 from lexis_r.zstd_wrap import decompress_payload, is_zstd
 
@@ -110,9 +111,7 @@ def _build_encoded_sentences(payload: Dict[str, Any]) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
-    """Cumulative sum of deltas -> absolute positions.
-    Each call is independent: prev resets to 0 implicitly via deltas[0].
-    """
+    """Cumulative sum of deltas -> absolute positions. Resets per call."""
     if not deltas:
         return []
     values = [deltas[0]]
@@ -122,8 +121,8 @@ def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
 
 
 def _reconstruct_chars_per_sentence(
-    char_classes:        List[int],
-    pos_deltas_nested:   List[List[int]],
+    char_classes:         List[int],
+    pos_deltas_nested:    List[List[int]],
     sentence_char_counts: List[int],
 ) -> str:
     """Reconstruct char stream, resetting the position counter per sentence."""
@@ -131,8 +130,8 @@ def _reconstruct_chars_per_sentence(
     chars: List[str] = []
     cls_offset = 0
     for s_idx, count in enumerate(sentence_char_counts):
-        classes = char_classes[cls_offset: cls_offset + count]
-        deltas  = pos_deltas_nested[s_idx] if s_idx < len(pos_deltas_nested) else []
+        classes   = char_classes[cls_offset: cls_offset + count]
+        deltas    = pos_deltas_nested[s_idx] if s_idx < len(pos_deltas_nested) else []
         positions = _cumulative_from_deltas(deltas)
         for cls, pos in zip(classes, positions):
             ch = inverse_map.get((cls, pos))
@@ -234,15 +233,15 @@ def decompress(input_path: str) -> str:
         total_count,
     )
 
-    # Split flat deltas back into per-sentence lists
-    delta_lengths = unpack_u8_list(bytes(payload["pos_deltas_sentence_counts"]))
+    # Split flat deltas back into per-sentence lists using VLQ lengths
+    delta_lengths      = unpack_vlq_list(bytes(payload["pos_deltas_sentence_counts"]))
     pos_deltas_nested: List[List[int]] = []
     offset = 0
     for length in delta_lengths:
         pos_deltas_nested.append(flat_deltas[offset: offset + length])
         offset += length
 
-    sentence_char_counts = unpack_u8_list(
+    sentence_char_counts = unpack_vlq_list(
         bytes(payload["packed_sentence_char_counts"])
     )
 
