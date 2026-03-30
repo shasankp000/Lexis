@@ -324,7 +324,12 @@ def decompress(input_path: str) -> str:
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
     morph_codes_flat   = [c for sent in morph_codes_nested for c in sent]
 
-    words  = [
+    # Guard: never apply morphological inflection to § symbol tokens.
+    # §W/§E/§R tokens are substitution placeholders that must be restored
+    # verbatim by decode_symbols. apply_morph would corrupt them by
+    # appending suffixes (e.g. §W1 -> §W1S, §W1ED).
+    words = [
+        root if root.startswith("\u00a7") else
         apply_morph(root, morph_codes_flat[i] if i < len(morph_codes_flat) else 0)
         for i, root in enumerate(roots)
     ]
