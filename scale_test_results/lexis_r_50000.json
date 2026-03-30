@@ -4,8 +4,8 @@
   "payload_bytes": 52392,
   "char_stream_bpb": 2.3531,
   "full_payload_bpb": 8.2174,
-  "word_overlap_pct": 72.47,
-  "restored_len": 49412,
-  "compress_sec": 47.26,
-  "decompress_sec": 2.53
+  "word_overlap_pct": 96.8,
+  "restored_len": 48938,
+  "compress_sec": 48.17,
+  "decompress_sec": 2.48
 }

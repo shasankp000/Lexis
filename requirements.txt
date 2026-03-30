@@ -10,3 +10,5 @@ safetensors==0.4.3
 fastcoref==2.1.6
 datasets
 zstandard
+plotly
+kaleido

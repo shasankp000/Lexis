@@ -1,0 +1,12 @@
+{
+  "input_chars": 50000,
+  "original_bytes": 51006,
+  "gzip_bytes": 22334,
+  "gzip_bpb": 3.503,
+  "gzip_compress_sec": 0.0019,
+  "gzip_decompress_sec": 0.0001,
+  "zstd_bytes": 21343,
+  "zstd_bpb": 3.3475,
+  "zstd_compress_sec": 0.0114,
+  "zstd_decompress_sec": 0.0001
+}
