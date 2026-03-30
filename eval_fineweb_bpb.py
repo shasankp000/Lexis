@@ -2,7 +2,7 @@
 
 Usage
 -----
-    python eval_fineweb_bpb.py --samples 50 --chars 5000 --out results.json
+    python eval_fineweb_bpb.py --samples 50 --chars 10000 --out results.json
 
 Flags
 -----
@@ -15,14 +15,23 @@ Flags
 
 What is measured
 ----------------
-For each document the script runs compress_to_file() and measures:
+For each document the script runs compress_to_file() and measures TWO bpb values:
 
-  bpb = (compressed_bitstream_bytes * 8) / original_utf8_bytes
+  bpb (char-stream) = (compressed_bitstream_bytes * 8) / original_utf8_bytes
 
-The 'compressed_bitstream_bytes' is the size of the raw arithmetic-coded
-char-class bitstream only (stage 7 output), NOT the full msgpack payload
-(which also stores the context model, POS tags, etc.).  This is the
-fairest apples-to-apples comparison against other arithmetic coders.
+    Where 'compressed_bitstream_bytes' is the size of the raw arithmetic-coded
+    char-class bitstream only (stage 7 output). This isolates core character-level
+    compression quality, comparable to other arithmetic coders.
+
+  bpb (full payload) = (lexis_file_bytes * 8) / original_utf8_bytes
+
+    Where 'lexis_file_bytes' is the size of the complete .lexis msgpack file on
+    disk, including the char-stream bitstream, POS tag sequences, tree shape
+    encodings, online context model state, pos-delta stream, and discourse symbol
+    table. This is the honest end-to-end compression ratio.
+
+The char-stream bpb and full-payload bpb are both reported in aggregate output
+and per-sample JSON results.
 
 A bpb of 8.0 means no compression.  English text typically compresses to
 ~1.5-2.5 bpb with a strong LM.  This pipeline targets ~3-5 bpb.
@@ -164,14 +173,19 @@ def _eval_one(
         stats = main_module.compress_to_file(text, tmp_path)
         elapsed = time.time() - t0
 
-        compressed_size = stats.get("compressed_size", 0)
+        compressed_size = stats.get("compressed_size", 0)  # char-stream bitstream only
+        full_payload_size = Path(tmp_path).stat().st_size   # complete .lexis file on disk
+
         bpb = (compressed_size * 8) / original_bytes if original_bytes else float("inf")
+        full_payload_bpb = (full_payload_size * 8) / original_bytes if original_bytes else float("inf")
 
         return {
             "sample": idx,
             "original_bytes": original_bytes,
             "compressed_bytes": compressed_size,
             "bpb": round(bpb, 4),
+            "full_payload_bytes": full_payload_size,
+            "full_payload_bpb": round(full_payload_bpb, 4),
             "compression_ratio": round(stats.get("compression_ratio", 0.0), 4),
             "discourse_symbols": stats.get("discourse_symbols", 0),
             "discourse_reduction_pct": stats.get("discourse_reduction_pct", 0.0),
@@ -185,6 +199,7 @@ def _eval_one(
             "error": str(exc),
             "traceback": traceback.format_exc() if verbose else None,
             "bpb": None,
+            "full_payload_bpb": None,
         }
     finally:
         Path(tmp_path).unlink(missing_ok=True)
@@ -236,14 +251,20 @@ def main() -> None:
         if result.get("bpb") is not None:
             if args.verbose:
                 print(
-                    f"  bpb: {result['bpb']:.4f}  "
+                    f"  bpb (char-stream): {result['bpb']:.4f}  "
+                    f"bpb (full-payload): {result['full_payload_bpb']:.4f}  "
                     f"orig={result['original_bytes']}B  "
                     f"comp={result['compressed_bytes']}B  "
+                    f"full={result['full_payload_bytes']}B  "
                     f"disc={result['discourse_symbols']}  "
                     f"t={result['elapsed_s']}s"
                 )
             else:
-                print(f"bpb={result['bpb']:.4f}  t={result['elapsed_s']}s")
+                print(
+                    f"bpb={result['bpb']:.4f}  "
+                    f"full={result['full_payload_bpb']:.4f}  "
+                    f"t={result['elapsed_s']}s"
+                )
         else:
             print(f"ERROR: {result.get('error', 'unknown')}")
 
@@ -254,26 +275,39 @@ def main() -> None:
     if valid:
         bpb_values = [r["bpb"] for r in valid]
         avg_bpb = sum(bpb_values) / len(bpb_values)
-        # population std dev
         variance = sum((b - avg_bpb) ** 2 for b in bpb_values) / len(bpb_values)
         std_bpb = variance ** 0.5
         min_bpb = min(bpb_values)
         max_bpb = max(bpb_values)
+
+        fp_values = [r["full_payload_bpb"] for r in valid]
+        avg_fp_bpb = sum(fp_values) / len(fp_values)
+        fp_variance = sum((b - avg_fp_bpb) ** 2 for b in fp_values) / len(fp_values)
+        std_fp_bpb = fp_variance ** 0.5
+        min_fp_bpb = min(fp_values)
+        max_fp_bpb = max(fp_values)
+
         total_orig = sum(r["original_bytes"] for r in valid)
         total_comp = sum(r["compressed_bytes"] for r in valid)
+        total_full = sum(r["full_payload_bytes"] for r in valid)
         overall_bpb = (total_comp * 8) / total_orig if total_orig else float("inf")
+        overall_fp_bpb = (total_full * 8) / total_orig if total_orig else float("inf")
 
-        print("\n" + "=" * 55)
+        print("\n" + "=" * 65)
         print("AGGREGATE RESULTS")
-        print("=" * 55)
-        print(f"  Samples evaluated : {len(valid)}/{len(results)}")
-        print(f"  Avg bpb           : {avg_bpb:.4f}  (±{std_bpb:.4f} std)")
-        print(f"  Overall bpb       : {overall_bpb:.4f}  (pooled bytes)")
-        print(f"  Min / Max bpb     : {min_bpb:.4f} / {max_bpb:.4f}")
-        print(f"  Total original    : {total_orig:,} bytes")
-        print(f"  Total compressed  : {total_comp:,} bytes")
-        print(f"  Total elapsed     : {total_elapsed:.1f}s")
-        print("=" * 55)
+        print("=" * 65)
+        print(f"  Samples evaluated          : {len(valid)}/{len(results)}")
+        print(f"  Avg bpb  (char-stream)     : {avg_bpb:.4f}  (±{std_bpb:.4f} std)")
+        print(f"  Overall  (char-stream)     : {overall_bpb:.4f}  (pooled bytes)")
+        print(f"  Min/Max  (char-stream)     : {min_bpb:.4f} / {max_bpb:.4f}")
+        print(f"  Avg bpb  (full payload)    : {avg_fp_bpb:.4f}  (±{std_fp_bpb:.4f} std)")
+        print(f"  Overall  (full payload)    : {overall_fp_bpb:.4f}  (pooled bytes)")
+        print(f"  Min/Max  (full payload)    : {min_fp_bpb:.4f} / {max_fp_bpb:.4f}")
+        print(f"  Total original             : {total_orig:,} bytes")
+        print(f"  Total compressed (char)    : {total_comp:,} bytes")
+        print(f"  Total compressed (full)    : {total_full:,} bytes")
+        print(f"  Total elapsed              : {total_elapsed:.1f}s")
+        print("=" * 65)
 
         summary = {
             "samples_evaluated": len(valid),
@@ -282,8 +316,14 @@ def main() -> None:
             "overall_bpb": round(overall_bpb, 4),
             "min_bpb": round(min_bpb, 4),
             "max_bpb": round(max_bpb, 4),
+            "avg_full_payload_bpb": round(avg_fp_bpb, 4),
+            "std_full_payload_bpb": round(std_fp_bpb, 4),
+            "overall_full_payload_bpb": round(overall_fp_bpb, 4),
+            "min_full_payload_bpb": round(min_fp_bpb, 4),
+            "max_full_payload_bpb": round(max_fp_bpb, 4),
             "total_original_bytes": total_orig,
             "total_compressed_bytes": total_comp,
+            "total_full_payload_bytes": total_full,
             "total_elapsed_s": round(total_elapsed, 1),
             "per_sample": results,
         }
