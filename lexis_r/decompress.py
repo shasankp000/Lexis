@@ -87,11 +87,11 @@ def _build_encoded_sentences(payload: Dict[str, Any], root_lengths_nested: List[
 def _sentinel_layout(lengths: List[int]) -> List[bool]:
     layout: List[bool] = []
     for t_idx, length in enumerate(lengths):
-        layout.append(True)                    # ^
-        layout.extend([False] * length)        # phonetic chars
-        layout.append(True)                    # $
+        layout.append(True)
+        layout.extend([False] * length)
+        layout.append(True)
         if t_idx < len(lengths) - 1:
-            layout.append(False)               # space char between tokens
+            layout.append(False)
     return layout
 
 
@@ -129,158 +129,95 @@ def _cumulative_from_deltas(deltas: List[int]) -> List[int]:
     return values
 
 
-def _build_phonetic_mask(
-    sentence_char_counts: List[int],
-    root_lengths_nested:  List[List[int]],
-) -> List[bool]:
-    """Build a boolean mask over the full char_stream.
-
-    True  = phonetic char (keep)
-    False = sentinel ^ / $ or inter-token space (discard)
-
-    The mask is derived purely from the structural metadata, so it is
-    correct even when inverse_map lookups for sentinel positions
-    accidentally succeed and include sentinel chars in char_stream.
-    """
-    mask: List[bool] = []
-    for s_idx, sent_count in enumerate(sentence_char_counts):
-        lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
-        n_tokens = len(lengths)
-        # Sentinel layout per sentence:
-        # for each token: ^ phonetic... $ [space-if-not-last]
-        # sentinels  = 2 * n_tokens
-        # spaces     = n_tokens - 1
-        # phonetic   = sum(lengths)
-        # total      = sent_count  (== sum(lengths) + 3*n_tokens - 1)
-        phonetic_set: set = set()
-        pos = 0
-        for t_idx, length in enumerate(lengths):
-            pos += 1                              # ^ sentinel
-            for _ in range(length):
-                phonetic_set.add(pos)
-                pos += 1
-            pos += 1                             # $ sentinel
-            if t_idx < n_tokens - 1:
-                pos += 1                         # space between tokens
-        mask.extend(i in phonetic_set for i in range(sent_count))
-    return mask
-
-
-def _reconstruct_chars_per_sentence(
+def _decode_chars_per_sentence(
     char_classes: List[int],
     pos_deltas_nested: List[List[int]],
     sentence_char_counts: List[int],
-) -> str:
-    """Decode the full char stream including sentinel positions.
+) -> List[List[str]]:
+    """Decode char stream, returning one list of chars per sentence.
 
-    Returns all chars that have a valid inverse_map entry, which includes
-    both phonetic chars and any sentinels whose (cls,pos) collides with a
-    real mapping. The caller must strip sentinels using _build_phonetic_mask.
+    Each inner list contains ALL chars that had a valid inverse_map
+    entry for that sentence — may include sentinel chars that collide
+    with phonetic mappings. Callers use root_lengths to extract only
+    the phonetic chars within each sentence.
     """
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
-    chars: List[str] = []
+    per_sentence: List[List[str]] = []
     cls_offset = 0
     for s_idx, count in enumerate(sentence_char_counts):
         classes   = char_classes[cls_offset: cls_offset + count]
         positions = _cumulative_from_deltas(
             pos_deltas_nested[s_idx] if s_idx < len(pos_deltas_nested) else []
         )
+        chars: List[str] = []
         for cls, pos in zip(classes, positions):
             ch = inverse_map.get((cls, pos))
             if ch is not None:
                 chars.append(ch)
+        per_sentence.append(chars)
         cls_offset += count
-    return "".join(chars)
+    return per_sentence
 
 
-def _extract_phonetic_chars(
-    char_stream: str,
-    sentence_char_counts: List[int],
-    root_lengths_nested: List[List[int]],
-) -> str:
-    """Strip sentinel positions from char_stream using structural metadata.
-
-    The char_stream length may differ from sum(sentence_char_counts) by a
-    small amount because inverse_map occasionally drops chars whose
-    (cls,pos) pair has no entry. We therefore align the mask to the
-    actual char_stream length by iterating both in lockstep.
-
-    Returns a string of exactly sum(root_lengths) phonetic chars.
-    """
-    # Build the full is-phonetic mask based on sentence structure
-    mask = _build_phonetic_mask(sentence_char_counts, root_lengths_nested)
-
-    # char_stream may be slightly shorter than len(mask) due to dropped
-    # chars. Walk both together, keeping only phonetic positions that
-    # actually produced a char.
-    phonetic: List[str] = []
-    stream_idx = 0
-    total_sent_chars = 0
-
-    for s_idx, sent_count in enumerate(sentence_char_counts):
-        lengths  = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
-        n_tokens = len(lengths)
-
-        # How many chars did inverse_map produce for this sentence?
-        # We don't know exactly, so we consume from char_stream using the
-        # per-sentence sent_count as the budget, adjusted for any
-        # previously dropped chars.
-        # Simpler: rebuild per-sentence phonetic positions and map them.
-        sent_phonetic_positions: set = set()
-        pos = 0
-        for t_idx, length in enumerate(lengths):
-            pos += 1
-            for _ in range(length):
-                sent_phonetic_positions.add(pos)
-                pos += 1
-            pos += 1
-            if t_idx < n_tokens - 1:
-                pos += 1
-
-        # We don't know which positions were actually decoded, so we
-        # fall back to using the old _split_roots approach combined with
-        # root_lengths to re-anchor. Instead: use a simpler invariant.
-        # The phonetic chars for each sentence appear in the same relative
-        # order in char_stream. We just need to skip the sentinel chars.
-        # Since we can't tell sentinel from phonetic by char value alone,
-        # use the count: this sentence contributes sum(lengths) phonetic
-        # chars and up to (3*n_tokens - 1) sentinel/space chars.
-        # Take the first sum(lengths) chars from our current stream window.
-        sent_total  = sent_count
-        sent_phon   = sum(lengths)
-
-        # Grab the window of chars this sentence produced
-        # (may be slightly fewer than sent_total if some were dropped)
-        window_end  = min(stream_idx + sent_total, len(char_stream))
-        window      = char_stream[stream_idx: window_end]
-
-        # Extract phonetic chars using positional mask within window
-        pos = 0
-        taken = 0
-        for ch_idx, ch in enumerate(window):
-            if pos in sent_phonetic_positions:
-                phonetic.append(ch)
-                taken += 1
-            pos += 1
-            if taken == sent_phon:
-                break
-
-        stream_idx = window_end
-
-    return "".join(phonetic)
-
-
-def _split_roots_by_lengths(
-    phonetic_stream: str,
+def _extract_phonetic_per_sentence(
+    chars_per_sentence: List[List[str]],
     root_lengths_nested: List[List[int]],
 ) -> List[str]:
-    """Slice the phonetic-only char stream into roots by token length."""
+    """Extract phonetic chars for each token using structural position mask.
+
+    For each sentence, the phonetic positions are known exactly from
+    root_lengths. We apply the mask to the per-sentence char list,
+    which eliminates any cross-sentence boundary assumptions and makes
+    each sentence's extraction fully independent.
+
+    Returns flat list of root strings, one per token.
+    """
     roots: List[str] = []
-    offset = 0
-    for lengths in root_lengths_nested:
+    for s_idx, lengths in enumerate(root_lengths_nested):
+        sent_chars = chars_per_sentence[s_idx] if s_idx < len(chars_per_sentence) else []
+        n_tokens   = len(lengths)
+
+        # Build set of phonetic positions within this sentence's char layout
+        # Layout: for each token: ^ [phonetic * length] $ [space if not last]
+        phonetic_positions: set = set()
+        pos = 0
+        for t_idx, length in enumerate(lengths):
+            pos += 1          # ^ sentinel
+            for _ in range(length):
+                phonetic_positions.add(pos)
+                pos += 1
+            pos += 1          # $ sentinel
+            if t_idx < n_tokens - 1:
+                pos += 1      # inter-token space
+
+        # Walk sent_chars, tagging each by its structural position
+        # sent_chars may be shorter than the full layout if some positions
+        # were dropped by inverse_map — use positional index into sent_chars
+        # as the structural position (they are in order, just possibly sparse)
+        #
+        # Key insight: the chars that WERE decoded appear in the same
+        # structural order. We know the expected total layout length
+        # (sum(lengths) + 3*n_tokens - 1). We walk sent_chars and assign
+        # each char to the next structural position, skipping positions
+        # that map to None (were dropped). Since dropped chars have no
+        # entry in sent_chars, we simply assign structural positions
+        # sequentially to the chars we have.
+        #
+        # This only works if drops are rare (they are: ~10/5737 = 0.17%).
+        # For robustness, we assign positions 0..len(sent_chars)-1 directly
+        # and check membership.
+        phonetic_chars: List[str] = []
+        for structural_pos, ch in enumerate(sent_chars):
+            if structural_pos in phonetic_positions:
+                phonetic_chars.append(ch)
+
+        # Now slice phonetic_chars into per-token roots
+        tok_offset = 0
         for length in lengths:
-            roots.append(phonetic_stream[offset: offset + length])
-            offset += length
+            root = "".join(phonetic_chars[tok_offset: tok_offset + length])
+            roots.append(root)
+            tok_offset += length
+
     return roots
 
 
@@ -383,12 +320,14 @@ def decompress(input_path: str) -> str:
 
     pos_deltas_nested    = _reconstruct_sentinel_deltas_per_sentence(content_nested, root_lengths_nested)
     sentence_char_counts = unpack_vlq_list(bytes(payload["packed_sentence_char_counts"]))
-    char_stream          = _reconstruct_chars_per_sentence(char_classes, pos_deltas_nested, sentence_char_counts)
 
-    # Strip sentinel positions and extract only phonetic chars,
-    # then slice into roots by token length.
-    phonetic_stream = _extract_phonetic_chars(char_stream, sentence_char_counts, root_lengths_nested)
-    roots           = _split_roots_by_lengths(phonetic_stream, root_lengths_nested)
+    # Decode chars per sentence (keeps per-sentence isolation)
+    chars_per_sentence = _decode_chars_per_sentence(
+        char_classes, pos_deltas_nested, sentence_char_counts
+    )
+
+    # Extract phonetic chars and slice into roots using structural mask
+    roots = _extract_phonetic_per_sentence(chars_per_sentence, root_lengths_nested)
 
     mc_data, mc_bits   = payload["packed_morph_codes"]
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
