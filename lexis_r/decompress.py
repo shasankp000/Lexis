@@ -337,11 +337,23 @@ def decompress(input_path: str) -> str:
     # Extract phonetic chars and slice into roots using structural mask
     roots = _extract_phonetic_per_sentence(chars_per_sentence, root_lengths_nested)
 
+    # Diagnostic: warn if any roots are empty (indicates phonetic char shortfall)
+    empty_root_indices = [i for i, r in enumerate(roots) if not r]
+    if empty_root_indices:
+        print(f"[WARN] {len(empty_root_indices)} empty roots out of {len(roots)} total")
+        print(f"[WARN] First 10 empty root positions: {empty_root_indices[:10]}")
+
     mc_data, mc_bits   = payload["packed_morph_codes"]
     morph_codes_nested = unpack_token_array(bytes(mc_data), mc_bits, 4)
     morph_codes_flat   = [c for sent in morph_codes_nested for c in sent]
 
-    words  = [apply_morph(root, morph_codes_flat[i] if i < len(morph_codes_flat) else 0) for i, root in enumerate(roots)]
+    # Guard apply_morph against empty roots — lemminflect crashes on base[-1]
+    # when root is "". Emit "" for empty roots; _join_words already skips them.
+    words = [
+        apply_morph(root, morph_codes_flat[i] if i < len(morph_codes_flat) else 0)
+        if root else ""
+        for i, root in enumerate(roots)
+    ]
     result = _join_words(words)
     result = result[0].upper() + result[1:] if result else result
 
