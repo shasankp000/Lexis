@@ -133,29 +133,49 @@ def _decode_chars_per_sentence(
     char_classes: List[int],
     pos_deltas_nested: List[List[int]],
     sentence_char_counts: List[int],
+    root_lengths_nested: List[List[int]],
 ) -> List[List[str]]:
     """Decode char stream, returning one list of chars per sentence.
 
-    Each inner list contains ALL chars that had a valid inverse_map
-    entry for that sentence — may include sentinel chars that collide
-    with phonetic mappings. Callers use root_lengths to extract only
-    the phonetic chars within each sentence.
+    Sentinel positions are explicitly excluded using _sentinel_layout so
+    no sentinel-collision chars can pollute the per-sentence char lists
+    and shift structural positions in _extract_phonetic_per_sentence.
+
+    Previously, chars whose (class, pos) coords happened to collide with
+    a valid PHONETIC_CLASSES inverse_map entry were included in the list.
+    At small scales (~10 collisions per 5k chars) this was negligible, but
+    at 100k+ chars the collision count grows linearly (~36k sentinels
+    stripped across 1012 sentences), causing _extract_phonetic_per_sentence
+    to assign wrong structural positions and drop ~1 word per 970 input
+    words.
     """
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     per_sentence: List[List[str]] = []
     cls_offset = 0
+
     for s_idx, count in enumerate(sentence_char_counts):
         classes   = char_classes[cls_offset: cls_offset + count]
         positions = _cumulative_from_deltas(
             pos_deltas_nested[s_idx] if s_idx < len(pos_deltas_nested) else []
         )
+
+        # Build sentinel mask for this sentence so we can skip sentinel
+        # positions even when they collide with a valid inverse_map entry.
+        lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
+        layout  = _sentinel_layout(lengths)  # True = sentinel position
+
         chars: List[str] = []
-        for cls, pos in zip(classes, positions):
+        for local_idx, (cls, pos) in enumerate(zip(classes, positions)):
+            is_sentinel = layout[local_idx] if local_idx < len(layout) else False
+            if is_sentinel:
+                continue
             ch = inverse_map.get((cls, pos))
             if ch is not None:
                 chars.append(ch)
+
         per_sentence.append(chars)
         cls_offset += count
+
     return per_sentence
 
 
@@ -177,8 +197,11 @@ def _extract_phonetic_per_sentence(
         sent_chars = chars_per_sentence[s_idx] if s_idx < len(chars_per_sentence) else []
         n_tokens   = len(lengths)
 
-        # Build set of phonetic positions within this sentence's char layout
+        # Build set of phonetic positions within this sentence's char layout.
         # Layout: for each token: ^ [phonetic * length] $ [space if not last]
+        # Because sentinel-collision chars are now filtered upstream, the
+        # chars in sent_chars correspond 1:1 with non-sentinel positions in
+        # the layout, so sequential structural position assignment is exact.
         phonetic_positions: set = set()
         pos = 0
         for t_idx, length in enumerate(lengths):
@@ -190,28 +213,12 @@ def _extract_phonetic_per_sentence(
             if t_idx < n_tokens - 1:
                 pos += 1      # inter-token space
 
-        # Walk sent_chars, tagging each by its structural position
-        # sent_chars may be shorter than the full layout if some positions
-        # were dropped by inverse_map — use positional index into sent_chars
-        # as the structural position (they are in order, just possibly sparse)
-        #
-        # Key insight: the chars that WERE decoded appear in the same
-        # structural order. We know the expected total layout length
-        # (sum(lengths) + 3*n_tokens - 1). We walk sent_chars and assign
-        # each char to the next structural position, skipping positions
-        # that map to None (were dropped). Since dropped chars have no
-        # entry in sent_chars, we simply assign structural positions
-        # sequentially to the chars we have.
-        #
-        # This only works if drops are rare (they are: ~10/5737 = 0.17%).
-        # For robustness, we assign positions 0..len(sent_chars)-1 directly
-        # and check membership.
         phonetic_chars: List[str] = []
         for structural_pos, ch in enumerate(sent_chars):
             if structural_pos in phonetic_positions:
                 phonetic_chars.append(ch)
 
-        # Now slice phonetic_chars into per-token roots
+        # Slice phonetic_chars into per-token roots
         tok_offset = 0
         for length in lengths:
             root = "".join(phonetic_chars[tok_offset: tok_offset + length])
@@ -321,9 +328,10 @@ def decompress(input_path: str) -> str:
     pos_deltas_nested    = _reconstruct_sentinel_deltas_per_sentence(content_nested, root_lengths_nested)
     sentence_char_counts = unpack_vlq_list(bytes(payload["packed_sentence_char_counts"]))
 
-    # Decode chars per sentence (keeps per-sentence isolation)
+    # Decode chars per sentence, now filtering sentinel-collision positions
+    # using root_lengths_nested to build an explicit sentinel mask per sentence.
     chars_per_sentence = _decode_chars_per_sentence(
-        char_classes, pos_deltas_nested, sentence_char_counts
+        char_classes, pos_deltas_nested, sentence_char_counts, root_lengths_nested
     )
 
     # Extract phonetic chars and slice into roots using structural mask
