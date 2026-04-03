@@ -85,13 +85,36 @@ def _build_encoded_sentences(payload: Dict[str, Any], root_lengths_nested: List[
 
 
 def _sentinel_layout(lengths: List[int]) -> List[bool]:
+    """Return a boolean mask where True = sentinel (^ or $) position.
+
+    Inter-token spaces are marked False (they are content delta positions
+    used by _reconstruct_sentinel_deltas_per_sentence).
+    """
     layout: List[bool] = []
     for t_idx, length in enumerate(lengths):
         layout.append(True)
         layout.extend([False] * length)
         layout.append(True)
         if t_idx < len(lengths) - 1:
-            layout.append(False)
+            layout.append(False)  # inter-token space: content delta, not sentinel
+    return layout
+
+
+def _exclude_layout(lengths: List[int]) -> List[bool]:
+    """Return a boolean mask where True = position to exclude from phonetic chars.
+
+    Marks sentinel positions (^ and $) AND inter-token spaces as True.
+    Used by _decode_chars_per_sentence to prevent space chars that happen
+    to collide with a valid PHONETIC_CLASSES inverse_map entry from leaking
+    into the per-sentence char list and shifting structural positions.
+    """
+    layout: List[bool] = []
+    for t_idx, length in enumerate(lengths):
+        layout.append(True)             # ^ sentinel — exclude
+        layout.extend([False] * length) # phonetic chars — keep
+        layout.append(True)             # $ sentinel — exclude
+        if t_idx < len(lengths) - 1:
+            layout.append(True)         # inter-token space — exclude
     return layout
 
 
@@ -135,19 +158,12 @@ def _decode_chars_per_sentence(
     sentence_char_counts: List[int],
     root_lengths_nested: List[List[int]],
 ) -> List[List[str]]:
-    """Decode char stream, returning one list of chars per sentence.
+    """Decode char stream, returning one list of phonetic chars per sentence.
 
-    Sentinel positions are explicitly excluded using _sentinel_layout so
-    no sentinel-collision chars can pollute the per-sentence char lists
-    and shift structural positions in _extract_phonetic_per_sentence.
-
-    Previously, chars whose (class, pos) coords happened to collide with
-    a valid PHONETIC_CLASSES inverse_map entry were included in the list.
-    At small scales (~10 collisions per 5k chars) this was negligible, but
-    at 100k+ chars the collision count grows linearly (~36k sentinels
-    stripped across 1012 sentences), causing _extract_phonetic_per_sentence
-    to assign wrong structural positions and drop ~1 word per 970 input
-    words.
+    Uses _exclude_layout to skip sentinel positions (^ and $) AND
+    inter-token space positions. Both can collide with valid PHONETIC_CLASSES
+    inverse_map entries and must be excluded so that _extract_phonetic_per_sentence
+    can assign structural positions sequentially without offset errors.
     """
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     per_sentence: List[List[str]] = []
@@ -159,15 +175,12 @@ def _decode_chars_per_sentence(
             pos_deltas_nested[s_idx] if s_idx < len(pos_deltas_nested) else []
         )
 
-        # Build sentinel mask for this sentence so we can skip sentinel
-        # positions even when they collide with a valid inverse_map entry.
         lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
-        layout  = _sentinel_layout(lengths)  # True = sentinel position
+        layout  = _exclude_layout(lengths)  # True = exclude (sentinel or space)
 
         chars: List[str] = []
         for local_idx, (cls, pos) in enumerate(zip(classes, positions)):
-            is_sentinel = layout[local_idx] if local_idx < len(layout) else False
-            if is_sentinel:
+            if layout[local_idx] if local_idx < len(layout) else False:
                 continue
             ch = inverse_map.get((cls, pos))
             if ch is not None:
@@ -199,19 +212,19 @@ def _extract_phonetic_per_sentence(
 
         # Build set of phonetic positions within this sentence's char layout.
         # Layout: for each token: ^ [phonetic * length] $ [space if not last]
-        # Because sentinel-collision chars are now filtered upstream, the
-        # chars in sent_chars correspond 1:1 with non-sentinel positions in
-        # the layout, so sequential structural position assignment is exact.
+        # sent_chars now contains ONLY phonetic chars (sentinels and spaces
+        # filtered by _decode_chars_per_sentence), so structural positions
+        # assigned sequentially here are exact.
         phonetic_positions: set = set()
         pos = 0
         for t_idx, length in enumerate(lengths):
-            pos += 1          # ^ sentinel
+            pos += 1          # ^ sentinel (excluded upstream)
             for _ in range(length):
                 phonetic_positions.add(pos)
                 pos += 1
-            pos += 1          # $ sentinel
+            pos += 1          # $ sentinel (excluded upstream)
             if t_idx < n_tokens - 1:
-                pos += 1      # inter-token space
+                pos += 1      # inter-token space (excluded upstream)
 
         phonetic_chars: List[str] = []
         for structural_pos, ch in enumerate(sent_chars):
@@ -328,8 +341,7 @@ def decompress(input_path: str) -> str:
     pos_deltas_nested    = _reconstruct_sentinel_deltas_per_sentence(content_nested, root_lengths_nested)
     sentence_char_counts = unpack_vlq_list(bytes(payload["packed_sentence_char_counts"]))
 
-    # Decode chars per sentence, now filtering sentinel-collision positions
-    # using root_lengths_nested to build an explicit sentinel mask per sentence.
+    # Decode chars per sentence, filtering sentinels AND inter-token spaces
     chars_per_sentence = _decode_chars_per_sentence(
         char_classes, pos_deltas_nested, sentence_char_counts, root_lengths_nested
     )
