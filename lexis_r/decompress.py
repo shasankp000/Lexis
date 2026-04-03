@@ -146,6 +146,11 @@ def _decode_chars_per_sentence(
     cannot shift structural positions in _extract_phonetic_per_sentence.
     Inter-token spaces are kept in the list; _extract_phonetic_per_sentence
     accounts for them when building phonetic_positions.
+
+    Unknown (cls, pos) coords that have no inverse_map entry are substituted
+    with '?' rather than dropped. Dropping would shorten sent_chars and shift
+    all subsequent token positions, cascading empty roots. '?' preserves the
+    positional slot so only the single affected token gets a wrong char.
     """
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     per_sentence: List[List[str]] = []
@@ -164,9 +169,8 @@ def _decode_chars_per_sentence(
         for local_idx, (cls, pos) in enumerate(zip(classes, positions)):
             if layout[local_idx] if local_idx < len(layout) else False:
                 continue  # skip sentinel positions
-            ch = inverse_map.get((cls, pos))
-            if ch is not None:
-                chars.append(ch)
+            # Use '?' for unknown coords — preserves positional alignment
+            chars.append(inverse_map.get((cls, pos), "?"))
 
         per_sentence.append(chars)
         cls_offset += count
@@ -328,7 +332,7 @@ def decompress(input_path: str) -> str:
     pos_deltas_nested    = _reconstruct_sentinel_deltas_per_sentence(content_nested, root_lengths_nested)
     sentence_char_counts = unpack_vlq_list(bytes(payload["packed_sentence_char_counts"]))
 
-    # Decode chars per sentence (sentinels filtered, spaces kept)
+    # Decode chars per sentence (sentinels filtered, spaces kept, unknowns -> '?')
     chars_per_sentence = _decode_chars_per_sentence(
         char_classes, pos_deltas_nested, sentence_char_counts, root_lengths_nested
     )
