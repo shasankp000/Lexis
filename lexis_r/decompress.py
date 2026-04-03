@@ -100,24 +100,6 @@ def _sentinel_layout(lengths: List[int]) -> List[bool]:
     return layout
 
 
-def _exclude_layout(lengths: List[int]) -> List[bool]:
-    """Return a boolean mask where True = position to exclude from phonetic chars.
-
-    Marks sentinel positions (^ and $) AND inter-token spaces as True.
-    Used by _decode_chars_per_sentence to prevent space chars that happen
-    to collide with a valid PHONETIC_CLASSES inverse_map entry from leaking
-    into the per-sentence char list and shifting structural positions.
-    """
-    layout: List[bool] = []
-    for t_idx, length in enumerate(lengths):
-        layout.append(True)             # ^ sentinel — exclude
-        layout.extend([False] * length) # phonetic chars — keep
-        layout.append(True)             # $ sentinel — exclude
-        if t_idx < len(lengths) - 1:
-            layout.append(True)         # inter-token space — exclude
-    return layout
-
-
 def _reconstruct_sentinel_deltas_per_sentence(
     content_nested: List[List[int]], root_lengths_nested: List[List[int]]
 ) -> List[List[int]]:
@@ -158,12 +140,12 @@ def _decode_chars_per_sentence(
     sentence_char_counts: List[int],
     root_lengths_nested: List[List[int]],
 ) -> List[List[str]]:
-    """Decode char stream, returning one list of phonetic chars per sentence.
+    """Decode char stream, returning one list of chars per sentence.
 
-    Uses _exclude_layout to skip sentinel positions (^ and $) AND
-    inter-token space positions. Both can collide with valid PHONETIC_CLASSES
-    inverse_map entries and must be excluded so that _extract_phonetic_per_sentence
-    can assign structural positions sequentially without offset errors.
+    Filters sentinel positions (^ and $) using _sentinel_layout so they
+    cannot shift structural positions in _extract_phonetic_per_sentence.
+    Inter-token spaces are kept in the list; _extract_phonetic_per_sentence
+    accounts for them when building phonetic_positions.
     """
     inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     per_sentence: List[List[str]] = []
@@ -176,12 +158,12 @@ def _decode_chars_per_sentence(
         )
 
         lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
-        layout  = _exclude_layout(lengths)  # True = exclude (sentinel or space)
+        layout  = _sentinel_layout(lengths)  # True = sentinel, skip it
 
         chars: List[str] = []
         for local_idx, (cls, pos) in enumerate(zip(classes, positions)):
             if layout[local_idx] if local_idx < len(layout) else False:
-                continue
+                continue  # skip sentinel positions
             ch = inverse_map.get((cls, pos))
             if ch is not None:
                 chars.append(ch)
@@ -198,10 +180,16 @@ def _extract_phonetic_per_sentence(
 ) -> List[str]:
     """Extract phonetic chars for each token using structural position mask.
 
-    For each sentence, the phonetic positions are known exactly from
-    root_lengths. We apply the mask to the per-sentence char list,
-    which eliminates any cross-sentence boundary assumptions and makes
-    each sentence's extraction fully independent.
+    sent_chars contains phonetic chars AND inter-token space chars (sentinels
+    filtered upstream). phonetic_positions is built by counting only
+    non-sentinel positions so structural_pos aligns with sent_chars indices:
+
+      Layout per token: ^ [phonetic*length] $ [space?]
+      sent_chars index:   0,1,...,L-1        L  (^ and $ skipped, not in list)
+
+    For each token we skip the two sentinel slots in our counter but DO
+    increment for the inter-token space so it occupies a slot (just not
+    a phonetic one).
 
     Returns flat list of root strings, one per token.
     """
@@ -210,21 +198,20 @@ def _extract_phonetic_per_sentence(
         sent_chars = chars_per_sentence[s_idx] if s_idx < len(chars_per_sentence) else []
         n_tokens   = len(lengths)
 
-        # Build set of phonetic positions within this sentence's char layout.
-        # Layout: for each token: ^ [phonetic * length] $ [space if not last]
-        # sent_chars now contains ONLY phonetic chars (sentinels and spaces
-        # filtered by _decode_chars_per_sentence), so structural positions
-        # assigned sequentially here are exact.
+        # Build phonetic_positions relative to the non-sentinel stream.
+        # Sentinels are NOT in sent_chars so we do NOT increment pos for them.
+        # Inter-token spaces ARE in sent_chars so we DO increment pos for them
+        # (but don't add to phonetic_positions).
         phonetic_positions: set = set()
         pos = 0
         for t_idx, length in enumerate(lengths):
-            pos += 1          # ^ sentinel (excluded upstream)
+            # ^ sentinel: skip (not in sent_chars)
             for _ in range(length):
                 phonetic_positions.add(pos)
                 pos += 1
-            pos += 1          # $ sentinel (excluded upstream)
+            # $ sentinel: skip (not in sent_chars)
             if t_idx < n_tokens - 1:
-                pos += 1      # inter-token space (excluded upstream)
+                pos += 1  # inter-token space: in sent_chars, occupies a slot
 
         phonetic_chars: List[str] = []
         for structural_pos, ch in enumerate(sent_chars):
@@ -341,12 +328,12 @@ def decompress(input_path: str) -> str:
     pos_deltas_nested    = _reconstruct_sentinel_deltas_per_sentence(content_nested, root_lengths_nested)
     sentence_char_counts = unpack_vlq_list(bytes(payload["packed_sentence_char_counts"]))
 
-    # Decode chars per sentence, filtering sentinels AND inter-token spaces
+    # Decode chars per sentence (sentinels filtered, spaces kept)
     chars_per_sentence = _decode_chars_per_sentence(
         char_classes, pos_deltas_nested, sentence_char_counts, root_lengths_nested
     )
 
-    # Extract phonetic chars and slice into roots using structural mask
+    # Extract phonetic chars and slice into roots
     roots = _extract_phonetic_per_sentence(chars_per_sentence, root_lengths_nested)
 
     # Diagnostic: warn if any roots are empty (indicates phonetic char shortfall)
@@ -360,7 +347,6 @@ def decompress(input_path: str) -> str:
     morph_codes_flat   = [c for sent in morph_codes_nested for c in sent]
 
     # Guard apply_morph against empty roots — lemminflect crashes on base[-1]
-    # when root is "". Emit "" for empty roots; _join_words already skips them.
     words = [
         apply_morph(root, morph_codes_flat[i] if i < len(morph_codes_flat) else 0)
         if root else ""
