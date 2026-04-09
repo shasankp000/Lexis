@@ -105,11 +105,10 @@ def _build_cumulative_counts(
         return [0], [0, 1], 1
     symbols = sorted(counts.keys())
     cumulative = [0]
-    running = 0
     for sym in symbols:
-        running += max(int(counts[sym]), 0)
-        cumulative.append(running)
-    total = cumulative[-1] if cumulative[-1] > 0 else 1
+        # min 1 per symbol — zero-width intervals must never occur
+        cumulative.append(cumulative[-1] + max(int(counts[sym]), 1))
+    total = cumulative[-1]
     return symbols, cumulative, total
 
 
@@ -182,10 +181,11 @@ class ArithmeticEncoder:
             low_sym  = cumulative[idx]
             high_sym = cumulative[idx + 1]
             range_width = self.high - self.low + 1
-            low_new  = self.low + (range_width * low_sym)  // total
-            high_new = self.low + (range_width * high_sym) // total - 1
-            self.low  = low_new
-            self.high = max(high_new, self.low)
+            orig_low  = self.low
+            self.low  = orig_low + (range_width * low_sym)  // total
+            self.high = orig_low + (range_width * high_sym) // total - 1
+            if self.high < self.low:
+                self.high = self.low
             self._renormalize()
         self._finalize()
         return self.writer.get_bytes()
@@ -204,8 +204,9 @@ class ArithmeticEncoder:
         low_sym  = cumulative[idx]
         high_sym = cumulative[idx + 1]
         range_width = self.high - self.low + 1
-        self.low  = self.low + (range_width * low_sym)  // total
-        self.high = self.low + (range_width * (high_sym - low_sym)) // total - 1
+        orig_low  = self.low
+        self.high = orig_low + (range_width * high_sym) // total - 1
+        self.low  = orig_low + (range_width * low_sym)  // total
         if self.high < self.low:
             self.high = self.low
         self._renormalize()
@@ -309,13 +310,15 @@ class ArithmeticDecoder:
             range_width = self.high - self.low + 1
             scaled = ((self.value - self.low + 1) * total - 1) // range_width
             idx    = max(bisect_right(cumulative, scaled) - 1, 0)
-            symbol = symbols_sorted[min(idx, len(symbols_sorted) - 1)]
+            idx    = min(idx, len(symbols_sorted) - 1)
+            symbol = symbols_sorted[idx]
             low_sym  = cumulative[idx]
             high_sym = cumulative[idx + 1]
-            low_new  = self.low + (range_width * low_sym)  // total
-            high_new = self.low + (range_width * high_sym) // total - 1
-            self.low  = low_new
-            self.high = max(high_new, self.low)
+            orig_low  = self.low
+            self.low  = orig_low + (range_width * low_sym)  // total
+            self.high = orig_low + (range_width * high_sym) // total - 1
+            if self.high < self.low:
+                self.high = self.low
             self._renormalize()
             decoded.append(symbol)
         return decoded
@@ -333,22 +336,13 @@ class ArithmeticDecoder:
         Decode one symbol using identical integer arithmetic to _encode_symbol.
 
         Both use _build_cdf() -> (syms, cumulative, total) and then
-        compute interval boundaries as (range_width * cum) // total.
+        compute interval boundaries as (range_width * cum) // total,
+        both relative to orig_low captured before any mutation.
         """
         syms, cumulative, total = _build_cdf(distribution)
         range_width = self.high - self.low + 1
 
-        # Find which CDF bucket the current value falls into.
-        # The encoder used: low_new = low + (range_width * low_sym) // total
-        # So we need the bucket i where:
-        #   (range_width * cum[i]) // total  <=  value - low
-        #   (range_width * cum[i+1]) // total > value - low
         scaled = self.value - self.low
-
-        # Convert scaled back to CDF space for bisect:
-        # We want largest i such that (range_width * cumulative[i]) // total <= scaled
-        # Equivalently: cumulative[i] <= (scaled * total) // range_width
-        # Use bisect_right on the mapped cumulative values.
         cdf_scaled = [(range_width * c) // total for c in cumulative]
 
         idx = max(bisect_right(cdf_scaled, scaled) - 1, 0)
@@ -358,8 +352,9 @@ class ArithmeticDecoder:
         low_sym  = cumulative[idx]
         high_sym = cumulative[idx + 1]
 
-        self.low  = self.low + (range_width * low_sym)  // total
-        self.high = self.low + (range_width * (high_sym - low_sym)) // total - 1
+        orig_low  = self.low
+        self.high = orig_low + (range_width * high_sym) // total - 1
+        self.low  = orig_low + (range_width * low_sym)  // total
         if self.high < self.low:
             self.high = self.low
 
