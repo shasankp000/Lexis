@@ -180,7 +180,7 @@ class ArithmeticEncoder:
     def __init__(self) -> None:
         self._reset()
 
-    # ── Public API ──────────────────────────────────────────────────────────
+    # ── Public API ──────────────────────────────────────────────────────────────────────
 
     def encode(
         self,
@@ -223,7 +223,7 @@ class ArithmeticEncoder:
         self._finalize()
         return self._writer.get_bytes()
 
-    # ── Internal helpers ─────────────────────────────────────────────────────
+    # ── Internal helpers ───────────────────────────────────────────────────────────────────────
 
     def _reset(self) -> None:
         self._low:     int = 0
@@ -244,9 +244,10 @@ class ArithmeticEncoder:
     def _update_interval(
         self, low_cum: int, high_cum: int, total: int
     ) -> None:
-        rw = self._high - self._low + 1
-        self._high = self._low + (rw * high_cum) // total - 1
-        self._low  = self._low + (rw * low_cum)  // total
+        rw       = self._high - self._low + 1
+        orig_low = self._low
+        self._high = orig_low + (rw * high_cum) // total - 1
+        self._low  = orig_low + (rw * low_cum)  // total
         if self._high < self._low:
             self._high = self._low
         self._renorm()
@@ -293,7 +294,7 @@ class ArithmeticDecoder:
         self._low    = 0
         self._high   = _FULL - 1
 
-    # ── Public API ──────────────────────────────────────────────────────────
+    # ── Public API ──────────────────────────────────────────────────────────────────────
 
     def decode(
         self,
@@ -339,7 +340,7 @@ class ArithmeticDecoder:
             self._update_interval(cum[idx], cum[idx + 1], total)
         return decoded
 
-    # ── Internal helpers ─────────────────────────────────────────────────────
+    # ── Internal helpers ───────────────────────────────────────────────────────────────────────
 
     def _init(self, data: bytes) -> None:
         self._reader = _BitReader(data)
@@ -373,11 +374,14 @@ class ArithmeticDecoder:
     def _update_interval(
         self, low_cum: int, high_cum: int, total: int
     ) -> None:
-        rw        = self._high - self._low + 1
-        new_high  = self._low + (rw * high_cum) // total - 1
-        new_low   = self._low + (rw * low_cum)  // total
+        rw       = self._high - self._low + 1
+        orig_low = self._low
+        new_high = orig_low + (rw * high_cum) // total - 1
+        new_low  = orig_low + (rw * low_cum)  // total
         self._low  = new_low
-        self._high = max(new_high, new_low)
+        self._high = new_high
+        if self._high < self._low:
+            self._high = self._low
         self._renorm()
 
     def _renorm(self) -> None:
@@ -412,7 +416,7 @@ def _run_self_test() -> None:
     """
     import random
 
-    # ── Test 1: unigram counts roundtrip ───────────────────────────────────
+    # ── Test 1: unigram counts roundtrip ───────────────────────────────────────
     counts: Dict[int, int] = {0: 50, 1: 30, 2: 15, 3: 5}
     rng    = random.Random(42)
     for trial in range(10):
@@ -430,14 +434,14 @@ def _run_self_test() -> None:
         )
     print("[self-test] unigram_counts: 10 trials PASSED")
 
-    # ── Test 2: single-symbol stream (degenerate distribution) ─────────────
+    # ── Test 2: single-symbol stream (degenerate distribution) ─────────────────
     counts2 = {7: 1}
     data2   = ArithmeticEncoder().encode_unigram_counts([7] * 50, counts2)
     rec2    = ArithmeticDecoder().decode_unigram_counts(data2, counts2, 50)
     assert rec2 == [7] * 50, "Single-symbol degenerate roundtrip FAILED"
     print("[self-test] degenerate single-symbol: PASSED")
 
-    # ── Test 3: high-entropy near-uniform distribution ─────────────────────
+    # ── Test 3: high-entropy near-uniform distribution ─────────────────────────
     counts3 = {i: 1 for i in range(7)}   # 7 equally-likely char classes
     rng3    = random.Random(99)
     syms3   = [rng3.randint(0, 6) for _ in range(300)]
@@ -446,7 +450,7 @@ def _run_self_test() -> None:
     assert rec3 == syms3, "High-entropy roundtrip FAILED"
     print("[self-test] high-entropy uniform: PASSED")
 
-    # ── Test 4: length boundary — exactly 1 symbol ─────────────────────────
+    # ── Test 4: length boundary — exactly 1 symbol ────────────────────────────
     counts4 = {3: 10, 5: 1}
     data4   = ArithmeticEncoder().encode_unigram_counts([3], counts4)
     rec4    = ArithmeticDecoder().decode_unigram_counts(data4, counts4, 1)
