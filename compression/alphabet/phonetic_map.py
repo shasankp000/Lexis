@@ -47,6 +47,14 @@ PHONETIC_CLASSES: dict[str, tuple[int, int]] = {
     ".": (6, 3),  # period — kept in class-6 to preserve original coordinates
 }
 
+# FIX: '$' is intentionally absent from this list.
+# It is already reserved as the word-end marker at coordinate (6, 1).
+# Including it here was causing a coordinate collision: the 'if ch not in
+# PHONETIC_CLASSES' guard silently skipped the assignment, but any literal
+# '$' in text (e.g. monetary amounts) was mapped to (6, 1) by get_coords(),
+# which stage8_decode treats as a word boundary — silently splitting words.
+# Literal '$' characters are now left to fall through to the (6, 4) unknown
+# fallback in get_coords(), which is harmless and round-trips correctly.
 _PUNCTUATION_CHARS = [
     ",",
     ";",
@@ -66,7 +74,7 @@ _PUNCTUATION_CHARS = [
     "\\",
     "@",
     "#",
-    "$",
+    # "$" removed — reserved as word-end marker at (6, 1)
     "%",
     "&",
     "*",

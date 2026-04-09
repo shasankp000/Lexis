@@ -63,10 +63,10 @@ _CODE_TO_PTB: Dict[int, str | None] = {
 # Safety-net overrides for the IRREGULAR decode path.
 # Any word in this table is returned verbatim, bypassing lemminflect.
 # This covers identity-mapped words (surface == root) that must never
-# be passed to lemminflect(VBD), and irregular comparatives/superlatives
+# be passed to lemminflect, and irregular comparatives/superlatives
 # that are encoded directly under the IRREGULAR code.
 _DECODE_OVERRIDES: Dict[str, str] = {
-    # be-verb ambiguities (lemminflect returns "was" for all be/VBD)
+    # be-verb ambiguities
     "are": "are",
     "were": "were",
     "been": "been",
@@ -134,10 +134,11 @@ def apply_morph(root: str, code: int) -> str:
         return root
 
     if code == IRREGULAR:
-        if root in _DECODE_OVERRIDES:
-            return _DECODE_OVERRIDES[root]
-        result = _inflect(root, "VBD")
-        return result if result else root
+        # FIX: never call lemminflect here — look up verbatim or return root.
+        # The old code blindly called _inflect(root, "VBD") for any root not
+        # in the override table, silently producing wrong past-tense forms for
+        # irregular words like pronouns, comparatives, etc.
+        return _DECODE_OVERRIDES.get(root, root)
 
     if code == NEGATION:
         if root.startswith("un"):
@@ -145,11 +146,17 @@ def apply_morph(root: str, code: int) -> str:
         return f"un{root}"
 
     if code == AGENT:
+        # FIX: guard against double-suffix (e.g. "runner" -> "runnerr")
+        if root.endswith("er") or root.endswith("or"):
+            return root
         if root.endswith("e"):
             return root + "r"
         return root + "er"
 
     if code == NOMINALIZE:
+        # FIX: guard against double -ness suffix
+        if root.endswith("ness"):
+            return root
         if root.endswith("y"):
             return root[:-1] + "iness"
         if root.endswith("e"):
@@ -157,6 +164,7 @@ def apply_morph(root: str, code: int) -> str:
         return root + "ness"
 
     if code == ADVERBIAL:
+        # FIX: guard against double -ly suffix
         if root.endswith("ly"):
             return root
         if root.endswith("y") and len(root) > 1:

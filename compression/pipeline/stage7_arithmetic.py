@@ -141,6 +141,9 @@ class ArithmeticEncoder:
         morph_stream, pos_stream, struct_probs = _build_context_stream(encoded_sentences)
         char_history: deque = deque(maxlen=CHAR_CONTEXT_SIZE)
 
+        # FIX: use min() so we never consume zero-padded context slots.
+        # The old code used max(), padding the shorter list with 0/"X" and
+        # feeding a corrupted distribution to the coder at those positions.
         length = min(len(char_classes), len(morph_stream), len(pos_stream))
         for idx in range(length):
             symbol = int(char_classes[idx])
@@ -273,6 +276,8 @@ class ArithmeticDecoder:
         char_history: deque = deque(maxlen=CHAR_CONTEXT_SIZE)
         decoded: List[int] = []
 
+        # FIX: mirror the encoder's min() so the decoder processes exactly
+        # the same number of symbols under the same context as the encoder.
         length = min(num_symbols, len(morph_stream), len(pos_stream))
         for idx in range(length):
             context = {
@@ -438,14 +443,13 @@ def _build_context_stream(
         else:
             struct_prob = 1.0 / max(len(sentence.get("pos_tags", [])), 1)
 
-        length = max(len(char_morph_codes), len(char_pos_tags))
+        # FIX: use min() so we only emit context slots where BOTH streams
+        # have valid data. The old max() padded the shorter list with 0/"X",
+        # feeding a corrupted probability distribution to the coder.
+        length = min(len(char_morph_codes), len(char_pos_tags))
         for i in range(length):
-            morph_stream.append(
-                int(char_morph_codes[i]) if i < len(char_morph_codes) else 0
-            )
-            pos_stream.append(
-                str(char_pos_tags[i]) if i < len(char_pos_tags) else "X"
-            )
+            morph_stream.append(int(char_morph_codes[i]))
+            pos_stream.append(str(char_pos_tags[i]))
             struct_probs.append(struct_prob)
 
     return morph_stream, pos_stream, struct_probs
