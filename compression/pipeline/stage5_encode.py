@@ -19,6 +19,12 @@ from compression.alphabet.phonetic_map import (
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
 from compression.pipeline.stage3_syntax import SyntaxResult
 
+# Stable mapping: (cls, pos) coords -> symbol index 0..N-1
+# Sorted by coords so encode and decode always agree.
+_COORDS_TO_IDX: Dict[tuple, int] = {
+    v: i for i, (_, v) in enumerate(sorted(PHONETIC_CLASSES.items(), key=lambda x: x[1]))
+}
+
 
 def _encode_factoradic_unsigned(value: int) -> List[int]:
     """Encode a non-negative integer into factoriadic digits."""
@@ -114,7 +120,14 @@ def _triples_for_sentence(words: List[str]) -> List[Tuple[int, int, int]]:
 
 
 def _char_classes_from_triples(triples: List[Tuple[int, int, int]]) -> List[int]:
-    return [cls for cls, _, _ in triples]
+    """Return full symbol indices (0..N-1) for each triple.
+
+    Previously this returned only the cls component (0-6), which made every
+    character within a phonetic class indistinguishable to the arithmetic
+    coder. Now we return the stable sorted index into PHONETIC_CLASSES so
+    the arithmetic stream encodes full character identity.
+    """
+    return [_COORDS_TO_IDX.get((cls, pos), 0) for cls, pos, _ in triples]
 
 
 def _expand_morph_codes_for_chars(

@@ -28,6 +28,12 @@ from lexis_r.payload import (
 )
 from lexis_r.zstd_wrap import decompress_payload, is_zstd
 
+# Stable symbol-index -> char mapping (mirrors _COORDS_TO_IDX in stage5_encode).
+# Sorted by coords so decode always agrees with encode.
+_IDX_TO_CHAR: Dict[int, str] = {
+    i: ch for i, (ch, _) in enumerate(sorted(PHONETIC_CLASSES.items(), key=lambda x: x[1]))
+}
+
 
 def _load_model(model_bytes: bytes) -> ContextMixingModel:
     with tempfile.NamedTemporaryFile(suffix=".lcm", delete=False) as tf:
@@ -142,35 +148,27 @@ def _decode_chars_per_sentence(
 ) -> List[List[str]]:
     """Decode char stream, returning one list of chars per sentence.
 
-    Filters sentinel positions (^ and $) using _sentinel_layout so they
-    cannot shift structural positions in _extract_phonetic_per_sentence.
-    Inter-token spaces are kept in the list; _extract_phonetic_per_sentence
-    accounts for them when building phonetic_positions.
+    char_classes now contains full symbol indices (0..N-1) as encoded by
+    _char_classes_from_triples in stage5_encode. Each index maps directly
+    to a character via _IDX_TO_CHAR — no (cls, pos) two-stream lookup needed.
 
-    Unknown (cls, pos) coords that have no inverse_map entry are substituted
-    with '?' rather than dropped. Dropping would shorten sent_chars and shift
-    all subsequent token positions, cascading empty roots. '?' preserves the
-    positional slot so only the single affected token gets a wrong char.
+    Sentinel positions (^ and $) are filtered via _sentinel_layout.
+    Inter-token spaces are kept; _extract_phonetic_per_sentence accounts for them.
+    Unknown indices are substituted with '?' to preserve positional alignment.
     """
-    inverse_map = {coords: ch for ch, coords in PHONETIC_CLASSES.items()}
     per_sentence: List[List[str]] = []
     cls_offset = 0
 
     for s_idx, count in enumerate(sentence_char_counts):
-        classes   = char_classes[cls_offset: cls_offset + count]
-        positions = _cumulative_from_deltas(
-            pos_deltas_nested[s_idx] if s_idx < len(pos_deltas_nested) else []
-        )
-
+        classes = char_classes[cls_offset: cls_offset + count]
         lengths = root_lengths_nested[s_idx] if s_idx < len(root_lengths_nested) else []
         layout  = _sentinel_layout(lengths)  # True = sentinel, skip it
 
         chars: List[str] = []
-        for local_idx, (cls, pos) in enumerate(zip(classes, positions)):
+        for local_idx, sym in enumerate(classes):
             if layout[local_idx] if local_idx < len(layout) else False:
                 continue  # skip sentinel positions
-            # Use '?' for unknown coords — preserves positional alignment
-            chars.append(inverse_map.get((cls, pos), "?"))
+            chars.append(_IDX_TO_CHAR.get(sym, "?"))
 
         per_sentence.append(chars)
         cls_offset += count
