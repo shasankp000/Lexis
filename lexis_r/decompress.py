@@ -36,6 +36,14 @@ _IDX_TO_CHAR: Dict[int, str] = {
 
 
 def _load_model(model_bytes: bytes) -> ContextMixingModel:
+    """Deserialise a ContextMixingModel from raw bytes.
+
+    IMPORTANT: this function must LOAD the serialised model — it must never
+    call model.train().  If you see the log line
+    "re-training context model from metadata" at runtime, you are running
+    stale .pyc bytecode from a previous version.  Delete all __pycache__
+    directories and rerun.
+    """
     with tempfile.NamedTemporaryFile(suffix=".lcm", delete=False) as tf:
         tf.write(model_bytes)
         tmp_path = tf.name
@@ -79,6 +87,12 @@ def _build_encoded_sentences(payload: Dict[str, Any], root_lengths_nested: List[
             char_pos_tags.append("X");      char_morph_codes.append(0)
             if tok_idx < len(lengths) - 1:
                 char_pos_tags.append("X"); char_morph_codes.append(0)
+        # Sanity check: both context streams must always be the same length.
+        # If this assertion fires, the root_lengths reconstruction is broken.
+        assert len(char_pos_tags) == len(char_morph_codes), (
+            f"Sentence {idx}: char_pos_tags length {len(char_pos_tags)} != "
+            f"char_morph_codes length {len(char_morph_codes)}"
+        )
         encoded.append({
             "char_pos_tags":    char_pos_tags,
             "char_morph_codes": char_morph_codes,
@@ -292,6 +306,9 @@ def decompress(input_path: str) -> str:
     slot_map  = unpack_slot_map(payload.get("slot_map", []))
     clean_len = int(payload.get("slot_clean_len", 0))
 
+    # Load the serialised model from the payload — do NOT retrain.
+    # If you see "re-training" in the log, you are running stale .pyc files.
+    # Fix: find and delete all __pycache__ dirs, then rerun.
     print("[Decompress] Loading context model from payload...")
     context_model = _load_model(zlib.decompress(bytes(payload["context_model_data"])))
 

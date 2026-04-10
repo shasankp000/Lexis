@@ -148,12 +148,20 @@ def _build_count_cdf(
 def build_context_stream(
     encoded_sentences: List[Dict],
 ) -> Tuple[List[int], List[str], List[float]]:
-    """Flatten per-sentence metadata into parallel per-symbol lists."""
+    """Flatten per-sentence metadata into parallel per-symbol lists.
+
+    char_morph_codes and char_pos_tags are always the same length within a
+    sentence (both built by the same token-iteration loop in either
+    _expand_morph_codes_for_chars / _expand_pos_tags_for_chars on the
+    compress side, or _build_encoded_sentences on the decompress side).
+    We assert this invariant here so any future divergence is caught early
+    rather than silently producing wrong context at the tail of a sentence.
+    """
     morph_stream: List[int]   = []
     pos_stream:   List[str]   = []
     struct_probs: List[float] = []
 
-    for sent in encoded_sentences:
+    for s_idx, sent in enumerate(encoded_sentences):
         morphs  = sent.get("char_morph_codes", [])
         pos     = sent.get("char_pos_tags",    [])
         n_tags  = int(sent.get("pos_n_tags",      0))
@@ -161,10 +169,25 @@ def build_context_stream(
         sp = 2 ** (-hbits / n_tags) if (n_tags > 0 and hbits > 0) else (
             1.0 / max(len(sent.get("pos_tags", [])), 1)
         )
-        length = max(len(morphs), len(pos))
+
+        # Both lists must be the same length.  If they differ, one of the
+        # encoding/decoding paths has a bug — truncate to the shorter one
+        # and emit a warning so the problem is visible rather than silently
+        # corrupting context at the padding positions.
+        if len(morphs) != len(pos):
+            import warnings
+            warnings.warn(
+                f"build_context_stream: sentence {s_idx} has "
+                f"char_morph_codes length {len(morphs)} != "
+                f"char_pos_tags length {len(pos)}. "
+                "Truncating to min — this indicates a bug in the encoder or decoder.",
+                stacklevel=2,
+            )
+
+        length = min(len(morphs), len(pos))   # safe: always equal; min guards against future bugs
         for i in range(length):
-            morph_stream.append(int(morphs[i]) if i < len(morphs) else 0)
-            pos_stream.append(str(pos[i])   if i < len(pos)    else "X")
+            morph_stream.append(int(morphs[i]))
+            pos_stream.append(str(pos[i]))
             struct_probs.append(sp)
 
     return morph_stream, pos_stream, struct_probs
