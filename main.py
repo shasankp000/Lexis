@@ -206,31 +206,33 @@ def _unpack_context_matrix(data: bytes, row_keys: list, n_cols: int) -> dict:
     return ctx
 
 
-# ── pos_huffman_bits: uint16 x100 quantisation ───────────────────────────────
+# ── pos_huffman_bits: uint16 count + uint16 x100 quantisation ────────────────
+# Count stored as uint16 (big-endian) to support >255 sentences.
 
 def _pack_huffman_bits(values: list[float]) -> bytes:
-    """1B count + 2B per value (scaled x100, 0.01-bit precision)."""
+    """2B count (uint16) + 2B per value (scaled x100, 0.01-bit precision)."""
     n = len(values)
     quantized = [min(round(v * 100), 65535) for v in values]
-    return bytes([n]) + b"".join(struct.pack(">H", q) for q in quantized)
+    return struct.pack(">H", n) + b"".join(struct.pack(">H", q) for q in quantized)
 
 
 def _unpack_huffman_bits(data: bytes) -> list[float]:
-    n = data[0]
-    return [struct.unpack(">H", data[1 + i * 2: 3 + i * 2])[0] / 100.0 for i in range(n)]
+    n = struct.unpack(">H", data[0:2])[0]
+    return [struct.unpack(">H", data[2 + i * 2: 4 + i * 2])[0] / 100.0 for i in range(n)]
 
 
 # ── uint8 lists (pos_n_tags, sentence_char_counts) ───────────────────────────
+# Count stored as uint16 (big-endian) to support >255 sentences.
 
 def _pack_u8_list(values: list[int]) -> bytes:
-    """1B count + 1B per value. Values must fit uint8."""
+    """2B count (uint16) + 1B per value. Values must fit uint8."""
     clamped = [min(v, 255) for v in values]
-    return bytes([len(clamped)] + clamped)
+    return struct.pack(">H", len(clamped)) + bytes(clamped)
 
 
 def _unpack_u8_list(data: bytes) -> list[int]:
-    n = data[0]
-    return list(data[1: n + 1])
+    n = struct.unpack(">H", data[0:2])[0]
+    return list(data[2: 2 + n])
 
 
 # ── pos_freq_table: 18 x uint32 fixed-order flat array ───────────────────────
@@ -283,22 +285,23 @@ def _unpack_pos_vocab(data: bytes, n_bits: int) -> list[str]:
 
 
 # ── pos_deltas_counts: sorted (int8 + uint16) pairs ──────────────────────────
+# Count stored as uint16 (big-endian) to support >255 distinct delta values.
 
 def _pack_deltas_counts(counts: dict[int, int]) -> bytes:
-    """n (1B) + sorted pairs of (int8 delta, uint16 count)."""
+    """2B count (uint16) + sorted pairs of (int8 delta, uint16 count)."""
     items = sorted(counts.items())
     n = len(items)
-    out = bytearray([n])
+    out = bytearray(struct.pack(">H", n))
     for delta, count in items:
         out += struct.pack(">bH", max(-128, min(127, delta)), min(count, 65535))
     return bytes(out)
 
 
 def _unpack_deltas_counts(data: bytes) -> dict[int, int]:
-    n = data[0]
+    n = struct.unpack(">H", data[0:2])[0]
     result: dict[int, int] = {}
     for i in range(n):
-        delta, count = struct.unpack(">bH", data[1 + i * 3: 4 + i * 3])
+        delta, count = struct.unpack(">bH", data[2 + i * 3: 5 + i * 3])
         result[delta] = count
     return result
 
