@@ -2,7 +2,7 @@
 
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
-Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, main branch), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure. The experimental **Lexis-R branch** (reconstructive variant) reaches **10.01 bpb full-payload / 2.23 bpb char-stream** on Moby Dick at 5k chars with 98.6% case-insensitive word overlap.
+Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure.
 
 > *"How much of the compressibility of English comes from its linguistic structure alone, versus from statistical regularities in training data?"*
 >
@@ -10,18 +10,9 @@ Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, main 
 
 ---
 
-## Branches
-
-| Branch | Variant | Reconstruction | Primary metric |
-|---|---|---|---|
-| `main` | **Lexis-E** | Exact (byte-level) | 2.7494 bpb on FineWeb |
-| `lexis-r` | **Lexis-R** | Semantic (root-form) | 10.01 bpb payload / 2.23 bpb char-stream |
-
----
-
 ## Benchmark Results
 
-### Lexis-E (main) — FineWeb
+### Lexis-E — FineWeb
 
 | System | bpb on web text | Notes |
 |---|---|---|
@@ -33,20 +24,6 @@ Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, main 
 | GPT-2 (1.5B params) | ≈1.30 | Trained on WebText |
 
 *Evaluated on 50 FineWeb samples × 10k chars, all pipeline stages active. Best single document: **2.6805 bpb** (10k chars, 17 discourse symbols).*
-
-### Lexis-R (lexis-r branch) — Moby Dick 5k chars
-
-| Metric | Value |
-|---|---|
-| char-stream bpb | **2.23** |
-| full-payload bpb | **10.01** |
-| payload size | 6,291 bytes |
-| case-insensitive word overlap | **98.6%** |
-| leaked § tokens | 0 |
-| compress time | ~15.6 s |
-| decompress time | ~0.54 s |
-
-*Scale test (5k–100k chars) in progress. Results will be added once complete.*
 
 ---
 
@@ -131,40 +108,18 @@ pytest compression/tests -v  # all 25 tests should pass
 ## Usage
 
 ```bash
-# Lexis-E: full compression and decompression round-trip
+# Full compression and decompression round-trip
 python test_round_trip_pipeline.py
 
-# Lexis-R: compress and decompress
-python -c "
-from lexis_r.compress import compress
-from lexis_r.decompress import decompress
-compress(open('input.txt').read(), 'output.lexisr')
-print(decompress('output.lexisr'))
-"
-
-# FineWeb benchmark (Lexis-E)
+# FineWeb benchmark
 python benchmark.py <input_text_file>
-
-# Scale test (Lexis-R)
-python -c "
-import json, re, os
-from lexis_r.compress import compress
-from lexis_r.decompress import decompress
-os.makedirs('scale_test_results', exist_ok=True)
-for size in [5000, 10000, 20000, 50000, 100000]:
-    text = open('moby_dick.txt').read().lstrip('\ufeff')[:size]
-    compress(text, f'/tmp/moby_r_{size}.lexisr')
-    restored = decompress(f'/tmp/moby_r_{size}.lexisr')
-    print(f'{size}: {len(restored)} chars restored')
-"
 ```
 
 ---
 
 ## Notes
 
-- **Semantic fidelity over byte-exact reconstruction (Lexis-R)** — Lexis-R encodes root forms; inflected forms are reconstructed via lemminflect. Capitalisation of non-entity proper nouns is lost (fix pending: capitalisation bitmap).
-- **Semantic fidelity over byte-exact reconstruction (Lexis-E)** — Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
+- **Semantic fidelity over byte-exact reconstruction** — Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
 - **IDE import warnings** — your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if not launched from inside the virtual environment. This is a false positive.
 - **GPU usage** — Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 rANS encoding runs on CPU.
 - **transformers version patch** — `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`.
@@ -175,13 +130,11 @@ for size in [5000, 10000, 20000, 50000, 100000]:
 
 Lexis started as a research point of interest for the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) — specifically the non-record track, which invites submissions that push the infinite frontier of parameter-limited performance without the 16MB / 10-minute constraint.
 
-It has since grown into a standalone research system with two active variants (Lexis-E and Lexis-R) and its own benchmark results.
-
 ---
 
 ## Current Test Corpus
 
-- **Moby Dick** (Project Gutenberg) — round-trip validated at 5k, 10k, 25k chars (Lexis-E); 5k chars benchmarked (Lexis-R); scale test 5k–100k in progress
+- **Moby Dick** (Project Gutenberg) — round-trip validated at 5k, 10k, 25k chars (Lexis-E)
 - **FineWeb** (HuggingFaceFW/fineweb, sample-10BT) — 50 samples × 10k chars, benchmarked (Lexis-E)
 
 ---
