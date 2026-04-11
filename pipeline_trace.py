@@ -389,7 +389,7 @@ _acf_cases = [
     ("hello",   CASE_TITLE, 0,          "Hello"),
     ("hello",   CASE_UPPER, 0,          "HELLO"),
     ("ebook",   CASE_MIXED, (1 << 1),   "eBook"),   # bit 1 → 'B'
-    ("iphone",  CASE_MIXED, (1 << 0),   "iPhone"),  # bit 0 → 'I'
+    ("iphone",  CASE_MIXED, (1 << 1),   "iPhone"),  # bit 0 → 'I'
     ("",        CASE_LOWER, 0,          ""),
     ("",        CASE_TITLE, 0,          ""),
     ("a",       CASE_TITLE, 0,          "A"),
