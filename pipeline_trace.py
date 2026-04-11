@@ -448,7 +448,7 @@ label("enc vs dec prob distributions match at all positions",
 ctx_test = {
     "char_history":       [],
     "current_morph_code": 0,
-    "current_pos_tag":    "NN",
+    "current_pos_tag":    "NOUN",
     "struct_prob":        0.5,
 }
 dist_test  = cm_enc.probability_distribution(ctx_test)
@@ -754,7 +754,7 @@ for d in [{}, {0: 1}, {-1: 5, 0: 3, 1: 2}, {k: k * 2 for k in range(10)}]:
     label(f"flat_dict round-trip len={len(d)}",
           rt == d, got=rt, expected=d)
 
-# --- pos (nested list[list[str]]) -------------------------------------
+# --- pos (nested list[list[str]]) — UPOS tags only --------------------
 pos_cases = [
     [],
     [[]],
@@ -790,6 +790,10 @@ for sentences in int_nested_cases:
 # Exercised below via full encode/decode_metadata.
 
 # --- Full encode_metadata / decode_metadata ---------------------------
+# NOTE: all POS tags must be UPOS (ADJ, ADP, ADV, AUX, CCONJ, DET, INTJ,
+# NOUN, NUM, PART, PRON, PROPN, PUNCT, SCONJ, SYM, VERB, X).
+# Penn Treebank tags (NN, VBZ, etc.) are NOT in TAG_TO_ID and will be
+# silently mapped to 'X', causing round-trip assertions to fail.
 test_metadata: Dict[str, Any] = {
     "compressed_bitstream":  b"\x01\x02\x03\xff",
     "pos_deltas_bitstream":  b"\xaa\xbb",
@@ -799,19 +803,19 @@ test_metadata: Dict[str, Any] = {
     "sentence_char_counts":  [12, 8],
     "pos_huffman_bits":      [3.14, 2.71],
     "pos_n_tags":            [5, 4],
-    "pos_tags":              [["NN", "VBZ", "DT"], ["NNP", "VBD"]],
+    "pos_tags":              [["NOUN", "VERB", "DET"], ["PROPN", "AUX"]],
     "morph_codes":           [[0, 2, 0], [0, 1]],
     "root_lengths":          [[3, 2, 1], [2, 3]],
     "model_weights":         [0.33, 0.33, 0.34],
     "char_context":          {0: {1: 5, 2: 3}, 1: {0: 2}},
     "morph_context":         {0: {0: 10}},
-    "struct_context":        {"NN": {0: 4, 1: 2}},
+    "struct_context":        {"NOUN": {0: 4, 1: 2}},
     "char_vocab":            [0, 1, 2, 3, 4, 5, 6],
     "morph_vocab":           [0, 2],
-    "pos_vocab":             ["NN", "VBZ", "DT"],
+    "pos_vocab":             ["NOUN", "VERB", "DET"],
     "num_symbols":           20,
     "num_char_classes":      7,
-    "pos_freq_table":        {"NN": 10, "VBZ": 5},
+    "pos_freq_table":        {"NOUN": 10, "VERB": 5},
 }
 
 encoded_binary = encode_metadata(test_metadata)
