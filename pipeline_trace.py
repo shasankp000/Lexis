@@ -96,6 +96,17 @@ label("whitespace-only normalizes to empty",
       normalize_text("   \n\t  ").strip() == "",
       got=repr(normalize_text("   \n\t  ")), expected="''")
 
+# Edge: tab and newline collapse to single space
+tab_nl = normalize_text("Hello\tworld.\nHow\nare\nyou?")
+label("tabs/newlines collapse to single space",
+      "  " not in tab_nl and "\t" not in tab_nl,
+      got=repr(tab_nl[:60]), expected="single spaces, no tabs")
+
+# Edge: already-normalized text must be idempotent
+label("normalize_text is idempotent",
+      normalize_text(normalized) == normalized,
+      got=repr(normalize_text(normalized)[:60]), expected=repr(normalized[:60]))
+
 print(f"  first 120 chars : {repr(normalized[:120])}")
 
 
@@ -144,6 +155,19 @@ label("all morph codes in 0–12",
       all(0 <= c <= 12 for _, _, c in morph_results),
       got=[c for _, _, c in morph_results if not (0 <= c <= 12)], expected="[]")
 
+# original token must never be empty
+label("no empty original token",
+      all(len(o) > 0 for o, _, _ in morph_results),
+      got=[o for o, _, _ in morph_results if not o], expected="[]")
+
+# Verify second sentence also analysable (idempotency across sentences)
+second_sent = all_sents[1] if len(all_sents) > 1 else first_sent
+morph2_check = analyser.analyse_sentence(second_sent.text)
+label("second sentence morph non-empty", len(morph2_check) > 0)
+label("second sentence morph codes in 0–12",
+      all(0 <= c <= 12 for _, _, c in morph2_check),
+      got=[c for _, _, c in morph2_check if not (0 <= c <= 12)], expected="[]")
+
 
 # =========================================================================
 # STAGE 3  — analyse_sentence
@@ -162,6 +186,14 @@ label("pos_tags count == morph token count",
 label("all pos_tags are non-empty strings",
       all(isinstance(t, str) and len(t) > 0 for t in syntax.pos_tags),
       got=[t for t in syntax.pos_tags if not t], expected="[]")
+
+# Second sentence
+syntax2_check = analyse_sentence(second_sent)
+label("second sentence pos_tags non-empty", len(syntax2_check.pos_tags) > 0)
+label("second sentence pos_tags count == morph2 count",
+      len(syntax2_check.pos_tags) == len(morph2_check),
+      len(syntax2_check.pos_tags), len(morph2_check))
+
 print(f"  pos_tags[:5] : {syntax.pos_tags[:5]}")
 
 
@@ -204,6 +236,12 @@ if symbol_table:
     label("encoded text contains at least one §E token",
           "§E" in compressed_text or len(symbol_table) == 0,
           got=compressed_text[:80], expected="contains §E...")
+
+# Edge: decode on text with no §-tokens must be identity
+no_symbol_text = "No entities here at all."
+label("decode text with no §-tokens is identity",
+      decode_symbols(no_symbol_text, {"§E0": "London"}) == no_symbol_text,
+      got=decode_symbols(no_symbol_text, {"§E0": "London"}), expected=no_symbol_text)
 
 
 # =========================================================================
@@ -275,6 +313,24 @@ label("case_bitmaps are non-negative ints",
       got=[b for b in case_bitmaps_enc if not (isinstance(b, int) and b >= 0)],
       expected="[]")
 
+# --- encode_sentence_full on second sentence ---
+syntax2      = analyse_sentence(second_sent)
+morph2       = analyser.analyse_sentence(second_sent.text)
+freq_table2  = struct_enc.build_pos_frequency_table([syntax.pos_tags, syntax2.pos_tags])
+encoded2     = char_enc.encode_sentence_full(morph2, syntax2, struct_enc, freq_table2)
+
+roots2       = encoded2["roots"]
+morph_codes2 = encoded2["morph_codes"]
+pos_tags2    = encoded2["pos_tags"]
+
+label("sentence 2 char_classes non-empty", len(encoded2["char_classes"]) > 0)
+label("sentence 2 case_flags length == roots2 count",
+      len(encoded2["case_flags"]) == len(roots2),
+      len(encoded2["case_flags"]), len(roots2))
+label("sentence 2 case_bitmaps length == roots2 count",
+      len(encoded2["case_bitmaps"]) == len(roots2),
+      len(encoded2["case_bitmaps"]), len(roots2))
+
 # --- compute_case_flag unit tests ---
 _ccf_cases = [
     ("the",     CASE_LOWER, 0),
@@ -286,6 +342,9 @@ _ccf_cases = [
     ("eBook",   CASE_MIXED, None),   # bitmap checked separately
     ("iPhone",  CASE_MIXED, None),
     ("",        CASE_LOWER, 0),
+    # purely numeric / punctuation tokens — must not raise
+    ("123",     CASE_LOWER, 0),
+    ("...",     CASE_LOWER, 0),
 ]
 for surface, expected_flag, expected_bitmap in _ccf_cases:
     flag, bitmap = compute_case_flag(surface)
@@ -301,13 +360,28 @@ for surface, expected_flag, expected_bitmap in _ccf_cases:
 # Verify that bitmap correctly encodes which characters are uppercase
 flag_ebook, bitmap_ebook = compute_case_flag("eBook")
 # 'e'=0 lower, 'B'=1 upper, 'o'=2 lower, 'o'=3 lower, 'k'=4 lower
-expected_bitmap_ebook = (1 << 1)  # bit 1 set for 'B'
 label("compute_case_flag('eBook') bitmap bit 1 set for 'B'",
       bitmap_ebook & (1 << 1) != 0,
       got=bin(bitmap_ebook), expected="bit 1 set")
 label("compute_case_flag('eBook') bitmap bit 0 not set for 'e'",
       bitmap_ebook & (1 << 0) == 0,
       got=bin(bitmap_ebook), expected="bit 0 clear")
+
+flag_iphone, bitmap_iphone = compute_case_flag("iPhone")
+label("compute_case_flag('iPhone') flag == CASE_MIXED",
+      flag_iphone == CASE_MIXED, got=flag_iphone, expected=CASE_MIXED)
+label("compute_case_flag('iPhone') bitmap bit 0 clear for 'i'",
+      bitmap_iphone & (1 << 0) == 0,
+      got=bin(bitmap_iphone), expected="bit 0 clear")
+label("compute_case_flag('iPhone') bitmap bit 1 set for 'P'",
+      bitmap_iphone & (1 << 1) != 0,
+      got=bin(bitmap_iphone), expected="bit 1 set")
+
+# ALL-CAPS single char
+flag_a, bitmap_a = compute_case_flag("A")
+label("compute_case_flag('A') flag == CASE_UPPER or CASE_TITLE",
+      flag_a in (CASE_UPPER, CASE_TITLE),
+      got=flag_a, expected=f"{CASE_UPPER} or {CASE_TITLE}")
 
 # --- apply_case_flag unit tests ---
 _acf_cases = [
@@ -321,6 +395,10 @@ _acf_cases = [
     ("a",       CASE_TITLE, 0,          "A"),
     ("abc",     CASE_UPPER, 0,          "ABC"),
     ("abc",     CASE_MIXED, 0b101,      "AbC"),     # bits 0,2 → 'A','C'
+    ("z",       CASE_LOWER, 0,          "z"),
+    ("z",       CASE_UPPER, 0,          "Z"),
+    ("hello",   CASE_MIXED, 0b00000,    "hello"),   # no bits set → all lower
+    ("hello",   CASE_MIXED, 0b11111,    "HELLO"),   # all bits set → all upper
 ]
 for word, flag, bitmap, expected_out in _acf_cases:
     result = apply_case_flag(word, flag, bitmap)
@@ -423,6 +501,15 @@ label("function recon pos == manual recon pos",
       recon_sentences[0]["char_pos_tags"] == recon_pos,
       recon_sentences[0]["char_pos_tags"][:10], recon_pos[:10])
 
+# Edge: empty payload must return empty list
+empty_payload = {
+    "root_lengths": [], "pos_huffman_bits": [], "pos_n_tags": [],
+    "pos_tags": [], "morph_codes": [],
+}
+label("_build_encoded_sentences_from_metadata([]) returns []",
+      _build_encoded_sentences_from_metadata(empty_payload) == [],
+      got=_build_encoded_sentences_from_metadata(empty_payload), expected=[])
+
 
 # =========================================================================
 # STAGE 5D  — compress_to_file root_lengths serialisation round-trip
@@ -430,16 +517,6 @@ label("function recon pos == manual recon pos",
 print(SEP)
 print("STAGE 5D — compress_to_file root_lengths serialisation round-trip")
 print(SEP)
-
-second_sent  = all_sents[1] if len(all_sents) > 1 else first_sent
-morph2       = analyser.analyse_sentence(second_sent.text)
-syntax2      = analyse_sentence(second_sent)
-freq_table2  = struct_enc.build_pos_frequency_table([syntax.pos_tags, syntax2.pos_tags])
-encoded2     = char_enc.encode_sentence_full(morph2, syntax2, struct_enc, freq_table2)
-
-roots2       = encoded2["roots"]
-morph_codes2 = encoded2["morph_codes"]
-pos_tags2    = encoded2["pos_tags"]
 
 packed_payload: Dict[str, Any] = {
     "root_lengths":     [[len(r) for r in roots], [len(r) for r in roots2]],
@@ -549,6 +626,14 @@ label("probability distribution sums to ~1.0",
       abs(total_prob - 1.0) < 1e-6,
       got=f"{total_prob:.8f}", expected="~1.0")
 
+# All symbols in the distribution must be non-negative probabilities
+label("all distribution probabilities >= 0",
+      all(p >= 0 for p in dist_test.values()),
+      got=[p for p in dist_test.values() if p < 0], expected="[]")
+
+# Distribution must be non-empty
+label("distribution is non-empty", len(dist_test) > 0)
+
 fake_s2_enc = {
     "char_classes":     encoded2["char_classes"],
     "char_morph_codes": encoded2["char_morph_codes"],
@@ -567,6 +652,13 @@ label("multi-sentence training: char_vocab non-empty",
 label("multi-sentence training: vocab >= single-sentence vocab",
       len(cm_multi.char_vocab) >= len(cm_enc.char_vocab),
       len(cm_multi.char_vocab), len(cm_enc.char_vocab))
+
+# Verify distribution after multi-sentence training also sums to ~1.0
+dist_multi = cm_multi.probability_distribution(ctx_test)
+total_multi = sum(dist_multi.values())
+label("multi-sentence distribution sums to ~1.0",
+      abs(total_multi - 1.0) < 1e-6,
+      got=f"{total_multi:.8f}", expected="~1.0")
 
 
 # =========================================================================
@@ -608,6 +700,22 @@ label("same-model encode/decode is lossless",
       decoded_same == char_classes,
       decoded_same[:10], char_classes[:10])
 
+# Single-symbol encode/decode
+if char_classes:
+    bs_single = enc.encode([char_classes[0]], cm_enc, {}, [fake_sentence_enc])
+    dec_single = dec.decode(bs_single, cm_enc, [fake_sentence_enc], 1)
+    label("single-symbol arithmetic encode/decode",
+          dec_single == [char_classes[0]],
+          got=dec_single, expected=[char_classes[0]])
+
+# Repeated-symbol stream
+repeated = [char_classes[0]] * 8 if char_classes else []
+if repeated:
+    bs_rep = enc.encode(repeated, cm_enc, {}, [fake_sentence_enc])
+    dec_rep = dec.decode(bs_rep, cm_enc, [fake_sentence_enc], len(repeated))
+    label("repeated-symbol arithmetic encode/decode",
+          dec_rep == repeated, got=dec_rep[:4], expected=repeated[:4])
+
 
 # =========================================================================
 # STAGE 7B  — pos_deltas unigram round-trip
@@ -637,6 +745,26 @@ bs3   = enc3.encode_unigram_counts(single_stream, single_counts)
 out3  = dec3.decode_unigram_counts(bs3, single_counts, len(single_stream))
 label("pos_deltas single-value round-trip",
       out3 == single_stream, out3, single_stream)
+
+# Edge: two-symbol alternating stream
+alt_stream = [0, 1] * 6
+alt_counts = Counter(alt_stream)
+enc4  = ArithmeticEncoder()
+dec4  = ArithmeticDecoder()
+bs4   = enc4.encode_unigram_counts(alt_stream, alt_counts)
+out4  = dec4.decode_unigram_counts(bs4, alt_counts, len(alt_stream))
+label("pos_deltas alternating-values round-trip",
+      out4 == alt_stream, out4, alt_stream)
+
+# Edge: all-zero deltas
+zero_stream = [0] * 10
+zero_counts = Counter(zero_stream)
+enc5 = ArithmeticEncoder()
+dec5 = ArithmeticDecoder()
+bs5  = enc5.encode_unigram_counts(zero_stream, zero_counts)
+out5 = dec5.decode_unigram_counts(bs5, zero_counts, len(zero_stream))
+label("pos_deltas all-zero round-trip",
+      out5 == zero_stream, out5, zero_stream)
 
 
 # =========================================================================
@@ -673,6 +801,15 @@ label("multi-sentence decoded classes == original",
       decoded_multi == all_classes,
       decoded_multi[:10], all_classes[:10])
 
+# Verify sentence 0 and 1 independently
+s0_len = len(char_classes)
+label("multi-sentence: sentence 0 portion matches",
+      decoded_multi[:s0_len] == char_classes,
+      decoded_multi[:5], char_classes[:5])
+label("multi-sentence: sentence 1 portion matches",
+      decoded_multi[s0_len:] == encoded2["char_classes"],
+      decoded_multi[s0_len:s0_len+5], encoded2["char_classes"][:5])
+
 
 # =========================================================================
 # STAGE 8  — _reconstruct_chars with DECODED (possibly corrupted) streams
@@ -703,6 +840,30 @@ if roots:
     label("_reconstruct_chars single-token smoke test",
           isinstance(single_rec, str),
           got=type(single_rec).__name__, expected="str")
+
+# Verify that ^ and $ boundary markers appear correctly
+label("_reconstruct_chars output starts with '^'",
+      reconstructed.startswith("^"),
+      got=reconstructed[:3], expected="starts with '^'")
+label("_reconstruct_chars output ends with '$'",
+      reconstructed.endswith("$"),
+      got=reconstructed[-3:], expected="ends with '$'")
+
+# Multi-sentence _reconstruct_chars
+reconstructed_multi = _reconstruct_chars(
+    decoded_multi,
+    decoded_deltas + dec5.decode_unigram_counts(
+        enc5.encode_unigram_counts(
+            encoded2["pos_deltas"], Counter(encoded2["pos_deltas"])
+        ),
+        Counter(encoded2["pos_deltas"]),
+        len(encoded2["pos_deltas"]),
+    ) if encoded2.get("pos_deltas") else decoded_deltas,
+    [len(char_classes), len(encoded2["char_classes"])],
+)
+label("_reconstruct_chars multi-sentence returns string",
+      isinstance(reconstructed_multi, str),
+      got=type(reconstructed_multi).__name__, expected="str")
 
 
 # =========================================================================
@@ -758,6 +919,13 @@ apply_cases = [
     (NOMINALIZE,   "dark",   "darkness"),
     (NOMINALIZE,   "kind",   "kindness"),
     (IRREGULAR,    "go",     None),
+    # Edge: single-char roots
+    (BASE,         "a",      "a"),
+    (PLURAL,       "i",      None),
+    # Edge: root ending in 'e' for morphological rules
+    (PAST_TENSE,   "love",   None),
+    (PRESENT_PART, "love",   None),
+    (AGENT,        "love",   None),
 ]
 
 for code, root, expect in apply_cases:
@@ -789,6 +957,11 @@ _acf9_cases = [
     ("",        CASE_LOWER, 0,        ""),
     ("",        CASE_TITLE, 0,        ""),
     ("",        CASE_UPPER, 0,        ""),
+    # Longer tokens
+    ("abcdef",  CASE_MIXED, 0b101010, "aBcDeF"),
+    ("abcdef",  CASE_MIXED, 0b010101, "AbCdEf"),
+    ("xyz",     CASE_UPPER, 0,        "XYZ"),
+    ("xyz",     CASE_LOWER, 0,        "xyz"),
 ]
 for word, flag, bitmap, expected_out in _acf9_cases:
     result = apply_case_flag(word, flag, bitmap)
@@ -813,6 +986,12 @@ _jw_cases = [
     ([],                                      ""),
     (["word"],                                "word"),
     (["Hello", "world"],                     "Hello world"),
+    # Additional edge cases
+    (["Hello", "!", "world", "?"],           "Hello! world?"),
+    (["\"", "hello", "\""],                  "\"hello\""),
+    (["I", "can", "'", "t"],                 "I can't"),
+    (["no", ".", "problem"],                 "no. problem"),
+    ([".", ",", "!"],                        ".,!"),
 ]
 
 for words_in, expected_out in _jw_cases:
@@ -847,31 +1026,33 @@ from compression.metadata_codec import (
 )
 
 # --- raw ---------------------------------------------------------------
-for raw_data in [b"", b"\x00", b"\xde\xad\xbe\xef" * 16]:
+for raw_data in [b"", b"\x00", b"\xde\xad\xbe\xef" * 16, bytes(range(256))]:
     rt = _dec_raw(_enc_raw(raw_data))
     label(f"raw round-trip len={len(raw_data)}",
           rt == raw_data, got=rt[:8], expected=raw_data[:8])
 
 # --- scalar ------------------------------------------------------------
-for val in [0, 1, -1, 127, -128, 1_000_000, -1_000_000]:
+for val in [0, 1, -1, 127, -128, 1_000_000, -1_000_000, 2**31 - 1, -(2**31)]:
     rt = _dec_scalar(_enc_scalar(val))
     label(f"scalar round-trip {val}",
           rt == val, got=rt, expected=val)
 
 # --- flat_uint ---------------------------------------------------------
-for data in [[], [0], [255], list(range(20)), [0] * 50]:
+for data in [[], [0], [255], list(range(20)), [0] * 50, [65535], [0, 1, 2, 3, 4]]:
     rt = _dec_flat_uint(_enc_flat_uint(data))
     label(f"flat_uint round-trip len={len(data)}",
           rt == data, got=rt[:5], expected=data[:5])
 
 # --- flat_int ----------------------------------------------------------
-for data in [[], [0], [-1, 0, 1], list(range(-10, 11)), [1_000_000, -1_000_000]]:
+for data in [[], [0], [-1, 0, 1], list(range(-10, 11)), [1_000_000, -1_000_000],
+             [-32768, 32767]]:
     rt = _dec_flat_int(_enc_flat_int(data))
     label(f"flat_int round-trip {data[:4]}{'...' if len(data) > 4 else ''}",
           rt == data, got=rt[:5], expected=data[:5])
 
 # --- flat_dict ---------------------------------------------------------
-for d in [{}, {0: 1}, {-1: 5, 0: 3, 1: 2}, {k: k * 2 for k in range(10)}]:
+for d in [{}, {0: 1}, {-1: 5, 0: 3, 1: 2}, {k: k * 2 for k in range(10)},
+          {-100: 999, 0: 0, 100: -999}]:
     rt = _dec_flat_dict(_enc_flat_dict(d))
     label(f"flat_dict round-trip len={len(d)}",
           rt == d, got=rt, expected=d)
@@ -882,6 +1063,7 @@ pos_cases = [
     [[]],
     [["NOUN", "VERB", "DET"]],
     [["NOUN", "VERB"], ["ADJ", "PUNCT", "X"]],
+    [["PROPN", "AUX", "NOUN", "VERB", "DET", "NOUN", "PUNCT"]],
 ]
 for sentences in pos_cases:
     rt = _dec_pos(_enc_pos(sentences))
@@ -895,6 +1077,8 @@ int_nested_cases = [
     [[0, 1, 2]],
     [[0, -1, 2], [3, -4]],
     [[i - 5 for i in range(10)]],
+    [[0] * 100],
+    [[12, 0, 3, 1, 0, 2, 0, 1]],
 ]
 for sentences in int_nested_cases:
     rt = _dec_int_nested(_enc_int_nested(sentences))
@@ -909,6 +1093,7 @@ _sd_cases = [
     {0: {1: 5, 2: 3}, 1: {0: 2}},
     {-1: {0: 10, -1: 3}, 0: {0: 4}},
     {k: {k + j: j + 1 for j in range(3)} for k in range(5)},
+    {100: {-100: 999}},
 ]
 for d in _sd_cases:
     rt = _dec_sparse_dict(_enc_sparse_dict(d))
@@ -922,6 +1107,7 @@ _sdp_cases = [
     {"NOUN": {0: 1}},
     {"NOUN": {1: 5, 2: 3}, "VERB": {0: 2}},
     {"ADJ": {0: 10}, "DET": {1: 4, 2: 2}, "PUNCT": {0: 1}},
+    {"X": {0: 1, 1: 2, 2: 3}},
 ]
 for d in _sdp_cases:
     rt = _dec_sparse_dict_pos(_enc_sparse_dict_pos(d))
@@ -936,6 +1122,8 @@ _mw_cases = [
     [1.0, 0.0, 0.0],
     [0.5, 0.3, 0.2],
     [0.9999999, 0.0000001, 0.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 1.0, 0.0],
 ]
 for weights in _mw_cases:
     rt = _dec_model_weights(_enc_model_weights(weights))
@@ -958,6 +1146,8 @@ _pf_cases = [
     {"NOUN": 10, "VERB": 5},
     {"NOUN": 100, "VERB": 50, "DET": 30, "ADJ": 20, "PUNCT": 15},
     {tag: i + 1 for i, tag in enumerate(["ADJ", "ADP", "ADV", "AUX", "NOUN", "VERB"])},
+    {"X": 1},
+    {"PROPN": 7, "PRON": 3},
 ]
 for d in _pf_cases:
     rt = _dec_pos_freq(_enc_pos_freq(d))
@@ -979,6 +1169,8 @@ _fn_cases = [
     [[3.14]],
     [[1.0, 2.0, 3.0]],
     [[1.5, 2.5], [3.5, 4.5]],
+    [[0.0, 0.0, 0.0]],
+    [[100.0, -100.0, 0.5, -0.5]],
 ]
 for sentences in _fn_cases:
     rt = _dec_float_nested(_enc_float_nested(sentences))
@@ -999,6 +1191,8 @@ _st_cases = [
     {"§E0": "London"},
     {"§E0": "Ishmael", "§E1": "Ahab", "§R0": "hunts"},
     {"§E0": "Ünïcödé", "§R1": "São Paulo"},
+    {"§E0": "A" * 50},   # long value
+    {"§E0": "x", "§E1": "y", "§E2": "z", "§E3": "w"},
 ]
 for d in _st_cases:
     rt = _dec_symbol_table(_enc_symbol_table(d))
@@ -1013,6 +1207,7 @@ cf_cases = [
     [[0, 1, 2, 3]],
     [[0, 0, 1], [2, 3, 0]],
     [[CASE_LOWER] * 10, [CASE_TITLE, CASE_UPPER, CASE_MIXED]],
+    [[CASE_MIXED] * 5],
 ]
 for sentences in cf_cases:
     rt = _dec_int_nested(_enc_int_nested(sentences))
@@ -1025,6 +1220,8 @@ cb_cases = [
     [[0, 0, 2, 0]],
     [[0, 2], [0, 4, 0]],
     [[0] * 8, [1, 2, 4, 8, 16]],
+    [[255, 0, 127]],
+    [[1 << i for i in range(8)]],
 ]
 for sentences in cb_cases:
     rt = _dec_int_nested(_enc_int_nested(sentences))
@@ -1056,7 +1253,7 @@ test_metadata: Dict[str, Any] = {
     "num_symbols":           20,
     "num_char_classes":      7,
     "pos_freq_table":        {"NOUN": 10, "VERB": 5},
-    # NEW — case fields
+    # case fields
     "case_flags":            [[CASE_LOWER, CASE_TITLE, CASE_UPPER],
                               [CASE_MIXED, CASE_LOWER]],
     "case_bitmaps":          [[0, 0, 0], [2, 0]],
@@ -1082,6 +1279,9 @@ label("is_lexi_file rejects empty bytes",
       got=True, expected=False)
 label("is_lexi_file rejects truncated magic",
       not is_lexi_file(b"LEX"),
+      got=True, expected=False)
+label("is_lexi_file rejects single byte",
+      not is_lexi_file(b"\x00"),
       got=True, expected=False)
 
 try:
@@ -1165,7 +1365,7 @@ try:
           got=decoded_meta.get("struct_context"),
           expected=test_metadata["struct_context"])
 
-    # --- NEW: case_flags and case_bitmaps round-trips ---
+    # --- case_flags and case_bitmaps round-trips ---
     label("case_flags round-trips",
           decoded_meta.get("case_flags") == test_metadata["case_flags"],
           got=decoded_meta.get("case_flags"),
@@ -1187,6 +1387,17 @@ try:
                   flag == orig_flag, got=flag, expected=orig_flag)
             label(f"case_bitmaps[{s_idx}][{t_idx}] == {orig_bitmap}",
                   bitmap == orig_bitmap, got=bitmap, expected=orig_bitmap)
+
+    # --- Additional: compress + decompress the metadata itself (idempotency) ---
+    # Re-encode the decoded metadata and check the binary is identical
+    re_encoded = encode_metadata(decoded_meta)
+    re_decoded = decode_metadata(re_encoded)
+    label("decode_metadata(encode_metadata(decoded)) is idempotent for pos_tags",
+          re_decoded.get("pos_tags") == test_metadata["pos_tags"],
+          got=re_decoded.get("pos_tags"), expected=test_metadata["pos_tags"])
+    label("decode_metadata(encode_metadata(decoded)) is idempotent for case_flags",
+          re_decoded.get("case_flags") == test_metadata["case_flags"],
+          got=re_decoded.get("case_flags"), expected=test_metadata["case_flags"])
 
 except Exception as _e10:
     label("decode_metadata completed without exception",
@@ -1224,6 +1435,14 @@ try:
         label(f"stats has key '{stat_key}'",
               stat_key in stats, got=list(stats.keys()), expected=f"contains '{stat_key}'")
 
+    label("compression_ratio > 0",
+          stats.get("compression_ratio", 0) > 0,
+          got=stats.get("compression_ratio"), expected="> 0")
+    label("original_size > compressed_size (file is actually compressed)",
+          stats.get("original_size", 0) > stats.get("compressed_size", 0),
+          got=(stats.get("original_size"), stats.get("compressed_size")),
+          expected="original > compressed")
+
     # Verify case_flags and case_bitmaps are persisted in the written file
     _raw_lexi = Path(tmp_path).read_bytes()
     _meta_check = decode_metadata(_raw_lexi)
@@ -1236,6 +1455,18 @@ try:
     label("case_flags sentence count == case_bitmaps sentence count",
           len(_meta_check["case_flags"]) == len(_meta_check["case_bitmaps"]),
           got=len(_meta_check["case_flags"]), expected=len(_meta_check["case_bitmaps"]))
+
+    # Verify case_flags values are all in 0–3
+    all_cf = [f for sent in _meta_check["case_flags"] for f in sent]
+    label("all serialised case_flags in 0–3",
+          all(0 <= f <= 3 for f in all_cf),
+          got=[f for f in all_cf if not (0 <= f <= 3)], expected="[]")
+
+    # Verify case_bitmaps are non-negative ints
+    all_cb = [b for sent in _meta_check["case_bitmaps"] for b in sent]
+    label("all serialised case_bitmaps are non-negative ints",
+          all(isinstance(b, int) and b >= 0 for b in all_cb),
+          got=[b for b in all_cb if not (isinstance(b, int) and b >= 0)], expected="[]")
 
     decoded_text = decompress(tmp_path)
 
@@ -1270,12 +1501,8 @@ try:
                   f"by {abs(len(decoded_text) - len(normalized))} chars")
 
     # --- case restoration spot-check ---
-    # Verify that tokens which should be Title-case or ALL-CAPS are
-    # correctly restored in the decompressed output.
     print("  -- case restoration spot-check --")
-    # Collect expected surface forms from the source
     _src_tokens = [item[0] for item in morph_results]
-    # Re-tokenise decoded text with the same spaCy model for a fair comparison
     _dec_doc    = nlp(decoded_text[:len(first_sent.text) + 5])
     _dec_tokens = [t.text for t in _dec_doc]
     _matched = 0
@@ -1294,6 +1521,21 @@ try:
             _dec = _dec_tokens[_i] if _i < len(_dec_tokens) else "?"
             match = "✓" if _src == _dec else "✗"
             print(f"    [{match}] src={_src!r:20} dec={_dec!r}")
+
+    # --- decompress on a second independent temp file (idempotency) ---
+    with tempfile.NamedTemporaryFile(suffix=".lexis", delete=False) as tf2:
+        tmp_path2 = tf2.name
+    try:
+        stats2 = compress_to_file(normalized, tmp_path2)
+        decoded2 = decompress(tmp_path2)
+        label("second independent compress/decompress identical to first",
+              decoded2 == decoded_text,
+              repr(decoded2[:80]), repr(decoded_text[:80]))
+    finally:
+        try:
+            os.unlink(tmp_path2)
+        except OSError:
+            pass
 
 except Exception as _e11:
     label("Stage 11 completed without exception",
@@ -1325,6 +1567,12 @@ autocorrect_cases = [
     "A",
     # Edge: already-correct text must not be altered
     normalized[:200],
+    # Edge: punctuation-only
+    "...",
+    # Edge: single word
+    "hello",
+    # Edge: numbers
+    "12345",
 ]
 
 for case in autocorrect_cases:
@@ -1336,6 +1584,10 @@ for case in autocorrect_cases:
         if case:
             label(f"autocorrect({snippet}) is non-empty",
                   len(result) > 0, got=len(result), expected="> 0")
+        # autocorrect must never expand the text beyond reason
+        label(f"autocorrect({snippet}) length <= 2x input",
+              len(result) <= max(len(case) * 2, 10),
+              got=len(result), expected=f"<= {max(len(case) * 2, 10)}")
     except Exception as _eac:
         label(f"autocorrect({snippet}) raises no exception",
               False, got=f"{type(_eac).__name__}: {_eac}", expected="no exception")
