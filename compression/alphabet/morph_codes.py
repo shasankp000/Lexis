@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from math import factorial
 from typing import Dict, List
 
@@ -61,10 +62,6 @@ _CODE_TO_PTB: Dict[int, str | None] = {
 }
 
 # Safety-net overrides for the IRREGULAR decode path.
-# Any word in this table is returned verbatim, bypassing lemminflect.
-# This covers identity-mapped words (surface == root) that must never
-# be passed to lemminflect(VBD), and irregular comparatives/superlatives
-# that are encoded directly under the IRREGULAR code.
 _DECODE_OVERRIDES: Dict[str, str] = {
     # be-verb ambiguities (lemminflect returns "was" for all be/VBD)
     "are": "are",
@@ -93,8 +90,6 @@ _DECODE_OVERRIDES: Dict[str, str] = {
     "yourself": "yourself",
     "yourselves": "yourselves",
     # Irregular comparatives / superlatives and other identity-mapped words.
-    # The encoder now emits BASE for these, but these overrides act as a
-    # decoder-side safety net in case any old payload encodes them as IRREGULAR.
     "most": "most",
     "best": "best",
     "worst": "worst",
@@ -108,6 +103,30 @@ _DECODE_OVERRIDES: Dict[str, str] = {
     "many": "many",
     "much": "much",
 }
+
+# Regex for the CVC (consonant-vowel-consonant) doubling pattern.
+# Matches a root that ends in: one consonant, one vowel, one consonant
+# where the final consonant is NOT w, x, or y (standard English rule).
+_VOWELS = "aeiou"
+_CVC_RE = re.compile(
+    r"[^aeiou][aeiou][^aeiouwxy]$",
+    re.IGNORECASE,
+)
+
+
+def _double_final_consonant(root: str) -> str:
+    """Double the final consonant of *root* if it matches the CVC pattern.
+
+    Examples:
+        run  -> runn  (then caller appends 'er' -> runner)
+        swim -> swimm
+        bat  -> batt
+        read -> read  (ends in vowel-consonant but preceded by vowel: no double)
+        eat  -> eat   (two vowels before final t)
+    """
+    if len(root) >= 3 and _CVC_RE.search(root):
+        return root + root[-1]
+    return root
 
 
 def encode_morph(code: int) -> List[int]:
@@ -145,9 +164,14 @@ def apply_morph(root: str, code: int) -> str:
         return f"un{root}"
 
     if code == AGENT:
+        # Apply CVC consonant-doubling before appending the agentive suffix.
+        # Examples: run -> runn+er = runner, write -> writ+er = writer (e-drop
+        # is already absent in the root), swim -> swimm+er = swimmer.
+        doubled = _double_final_consonant(root)
         if root.endswith("e"):
+            # root already ends in -e: just append -r (e.g. "write" -> "writer")
             return root + "r"
-        return root + "er"
+        return doubled + "er"
 
     if code == NOMINALIZE:
         if root.endswith("y"):

@@ -40,7 +40,9 @@ def normalize_text(text: str) -> str:
     if not text:
         return ""
 
-    normalized = text
+    # Strip BOM (U+FEFF) from the very start — it has no entry in
+    # PHONETIC_CLASSES and would corrupt the first token's root if left in.
+    normalized = text.lstrip("\ufeff")
 
     # Typographic -> ASCII punctuation (must come before whitespace collapse
     # so that any incidental spaces introduced are handled below).

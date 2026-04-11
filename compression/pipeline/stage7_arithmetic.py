@@ -66,6 +66,13 @@ class ArithmeticEncoder:
         self.pending = 0
         self.writer = _BitWriter()
 
+    def _reset(self) -> None:
+        """Reset all mutable coding state so the instance can be reused."""
+        self.low = 0
+        self.high = (1 << 32) - 1
+        self.pending = 0
+        self.writer = _BitWriter()
+
     def encode(
         self,
         char_classes: List[int],
@@ -74,6 +81,7 @@ class ArithmeticEncoder:
         encoded_sentences: List[Dict],
     ) -> bytes:
         """Encode char_classes stream into compressed bytes."""
+        self._reset()
         morph_stream, pos_stream, struct_probs = _build_context_stream(
             encoded_sentences
         )
@@ -99,10 +107,7 @@ class ArithmeticEncoder:
         self, symbols: List[int], distribution: Dict[int, float]
     ) -> bytes:
         """Encode a symbol stream using a fixed unigram distribution."""
-        self.low = 0
-        self.high = (1 << 32) - 1
-        self.pending = 0
-        self.writer = _BitWriter()
+        self._reset()
         for symbol in symbols:
             self._encode_symbol(int(symbol), distribution)
         self._finalize()
@@ -112,10 +117,7 @@ class ArithmeticEncoder:
         self, symbols: List[int], counts: Dict[int, int]
     ) -> bytes:
         """Encode a symbol stream using integer unigram counts."""
-        self.low = 0
-        self.high = (1 << 32) - 1
-        self.pending = 0
-        self.writer = _BitWriter()
+        self._reset()
         symbols_sorted, cumulative, total = _build_cumulative_counts(counts)
         symbol_to_index = {sym: idx for idx, sym in enumerate(symbols_sorted)}
         for symbol in symbols:
@@ -197,6 +199,15 @@ class ArithmeticDecoder:
         self.low = 0
         self.high = (1 << 32) - 1
 
+    def _reset(self, compressed_bytes: bytes) -> None:
+        """Reset all mutable decoding state for a fresh decode pass."""
+        self.reader = _BitReader(compressed_bytes)
+        self.value = 0
+        self.low = 0
+        self.high = (1 << 32) - 1
+        for _ in range(32):
+            self.value = (self.value << 1) | self._read_bit()
+
     def decode(
         self,
         compressed_bytes: bytes,
@@ -204,10 +215,7 @@ class ArithmeticDecoder:
         encoded_sentences: List[Dict],
         num_symbols: int,
     ) -> List[int]:
-        self.reader = _BitReader(compressed_bytes)
-        self.value = 0
-        for _ in range(32):
-            self.value = (self.value << 1) | self._read_bit()
+        self._reset(compressed_bytes)
 
         morph_stream, pos_stream, struct_probs = _build_context_stream(
             encoded_sentences
@@ -234,12 +242,7 @@ class ArithmeticDecoder:
         self, compressed_bytes: bytes, distribution: Dict[int, float], num_symbols: int
     ) -> List[int]:
         """Decode a symbol stream using a fixed unigram distribution."""
-        self.reader = _BitReader(compressed_bytes)
-        self.value = 0
-        self.low = 0
-        self.high = (1 << 32) - 1
-        for _ in range(32):
-            self.value = (self.value << 1) | self._read_bit()
+        self._reset(compressed_bytes)
         decoded: List[int] = []
         for _ in range(num_symbols):
             symbol = self._decode_symbol(distribution)
@@ -250,12 +253,7 @@ class ArithmeticDecoder:
         self, compressed_bytes: bytes, counts: Dict[int, int], num_symbols: int
     ) -> List[int]:
         """Decode a symbol stream using integer unigram counts."""
-        self.reader = _BitReader(compressed_bytes)
-        self.value = 0
-        self.low = 0
-        self.high = (1 << 32) - 1
-        for _ in range(32):
-            self.value = (self.value << 1) | self._read_bit()
+        self._reset(compressed_bytes)
 
         symbols_sorted, cumulative, total = _build_cumulative_counts(counts)
         decoded: List[int] = []

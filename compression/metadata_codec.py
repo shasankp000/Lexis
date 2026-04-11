@@ -102,9 +102,18 @@ def _enc_varint(n: int) -> bytearray:
     return res
 
 def _dec_varint(it) -> int:
+    """Decode a varint from iterator *it*.
+
+    Raises ValueError (not StopIteration) when the iterator is exhausted
+    mid-decode, so callers can always treat StopIteration as a normal
+    loop-exit signal.
+    """
     num, shift = 0, 0
     while True:
-        byte = next(it)
+        try:
+            byte = next(it)
+        except StopIteration:
+            raise ValueError("_dec_varint: unexpected end of data") from None
         num |= (byte & 0x7F) << shift
         if not (byte & 0x80):
             return num
@@ -467,14 +476,20 @@ def _dec_sparse_dict_pos(blob: bytes) -> Dict[str, Dict[int, int]]:
     return {ID_TO_TAG.get(k, "X"): v for k, v in int_keyed.items()}
 
 # ---- mode: pos_freq (dict[str, int]) ------------------------------------
+# Wire format (before CRC):
+#   varint  n_entries
+#   for each entry (exactly n_entries pairs follow):
+#     varint  tag_id
+#     varint  count
 
 def _enc_pos_freq(d: Dict[str, int]) -> bytes:
     blob = bytearray()
-    blob.extend(_enc_varint(len(d)))
-    for tag in UPOS_TAGS:
-        if tag in d:
-            blob.extend(_enc_varint(TAG_TO_ID[tag]))
-            blob.extend(_enc_varint(d[tag]))
+    # Only encode tags that actually appear in our UPOS set
+    entries = [(TAG_TO_ID[tag], d[tag]) for tag in UPOS_TAGS if tag in d]
+    blob.extend(_enc_varint(len(entries)))
+    for tag_id, count in entries:
+        blob.extend(_enc_varint(tag_id))
+        blob.extend(_enc_varint(count))
     crc = zlib.crc32(bytes(blob)) & 0xFFFFFFFF
     blob.extend(struct.pack("<I", crc))
     return bytes(blob)
@@ -484,7 +499,8 @@ def _dec_pos_freq(blob: bytes) -> Dict[str, int]:
     computed = zlib.crc32(blob[:-4]) & 0xFFFFFFFF
     if stored != computed:
         raise ValueError("pos_freq: CRC mismatch")
-    it  = iter(blob[:-4])
+    payload = blob[:-4]
+    it  = iter(payload)
     n   = _dec_varint(it)
     out: Dict[str, int] = {}
     for _ in range(n):
@@ -552,8 +568,6 @@ def _dec_symbol_table(blob: bytes) -> Dict[str, str]:
 
 # ---- mode: model_weights (list[float], exactly 3 elements) --------------
 # Stored as three IEEE-754 single-precision (float32) values + CRC.
-# This gives ~7 significant digits, far better than the old uint16 scheme
-# which had precision of only 0.0001 and derived w2 = 1 - w0 - w1 (lossy).
 
 def _enc_model_weights(weights: List[float]) -> bytes:
     w = (list(weights) + [0.0, 0.0, 0.0])[:3]
