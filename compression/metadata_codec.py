@@ -26,7 +26,7 @@ Field IDs (FIELD_*):
    14  STRUCT_CONTEXT         mode sparse_dict_pos
    15  CHAR_VOCAB             mode flat_uint
    16  MORPH_VOCAB            mode flat_uint
-   17  POS_VOCAB              mode pos_freq  (keys only, values all 0)
+   17  POS_VOCAB              mode flat_uint  (ordered list of UPOS tag IDs)
    18  NUM_SYMBOLS            mode scalar
    19  NUM_CHAR_CLASSES       mode scalar
    20  POS_FREQ_TABLE         mode pos_freq
@@ -509,6 +509,18 @@ def _dec_pos_freq(blob: bytes) -> Dict[str, int]:
         out[ID_TO_TAG.get(tag_id, "X")] = count
     return out
 
+# ---- mode: pos_vocab (ordered list[str] of UPOS tags) --------------------
+# Stored as a flat_uint list of tag IDs, preserving insertion order.
+# This differs from pos_freq, which sorts by UPOS_TAGS order on encode.
+
+def _enc_pos_vocab(tags: List[str]) -> bytes:
+    ids = [TAG_TO_ID.get(tag, TAG_TO_ID["X"]) for tag in tags]
+    return _enc_flat_uint(ids)
+
+def _dec_pos_vocab(blob: bytes) -> List[str]:
+    ids = _dec_flat_uint(blob)
+    return [ID_TO_TAG.get(i, "X") for i in ids]
+
 # ---- mode: symbol_table (dict[str, str]) ---------------------------------
 # Keys are §E{n} (entity) or §R{n} (relation).
 # Values are plain surface strings (e.g. "Ishmael", "however").
@@ -668,9 +680,10 @@ def encode_metadata(meta: Dict[str, Any]) -> bytes:
     _field(FIELD_MORPH_CONTEXT,  _enc_sparse_dict(morph_ctx))
     _field(FIELD_STRUCT_CONTEXT, _enc_sparse_dict_pos(struct_ctx))
 
-    # pos_vocab
-    pv_freq = {tag: 1 for tag in meta.get("pos_vocab", []) if tag in TAG_TO_ID}
-    _field(FIELD_POS_VOCAB, _enc_pos_freq(pv_freq))
+    # pos_vocab — encoded as ordered flat_uint list of tag IDs to preserve
+    # insertion order (pos_freq would sort by UPOS_TAGS order, losing order)
+    pv_list = [tag for tag in meta.get("pos_vocab", []) if tag in TAG_TO_ID]
+    _field(FIELD_POS_VOCAB, _enc_pos_vocab(pv_list))
 
     # pos_freq_table
     pft = {str(k): int(v) for k, v in meta.get("pos_freq_table", {}).items()}
@@ -730,8 +743,9 @@ def decode_metadata(data: bytes) -> Dict[str, Any]:
     meta["morph_context"]  = _dec_sparse_dict(_get(FIELD_MORPH_CONTEXT))      if _get(FIELD_MORPH_CONTEXT)  else {}
     meta["struct_context"] = _dec_sparse_dict_pos(_get(FIELD_STRUCT_CONTEXT)) if _get(FIELD_STRUCT_CONTEXT) else {}
 
+    # pos_vocab — decode as ordered list, preserving original insertion order
     pv_blob = _get(FIELD_POS_VOCAB)
-    meta["pos_vocab"] = list(_dec_pos_freq(pv_blob).keys()) if pv_blob else []
+    meta["pos_vocab"] = _dec_pos_vocab(pv_blob) if pv_blob else []
 
     pft_blob = _get(FIELD_POS_FREQ_TABLE)
     meta["pos_freq_table"] = _dec_pos_freq(pft_blob) if pft_blob else {}
