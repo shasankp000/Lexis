@@ -486,32 +486,64 @@ def _dec_pos_freq(blob: bytes) -> Dict[str, int]:
         out[ID_TO_TAG.get(tag_id, "X")] = count
     return out
 
-# ---- mode: symbol_table (dict[str, tuple[int,int]]) ----------------------
+# ---- mode: symbol_table (dict[str, str]) ---------------------------------
+# Keys are §E{n} (entity) or §R{n} (relation).
+# Values are plain surface strings (e.g. "Ishmael", "however").
+#
+# Wire format (before CRC):
+#   varint  n_entries
+#   for each entry:
+#     byte    key_type   (0 = §E, 1 = §R)
+#     varint  key_index  (the {n} in §E{n})
+#     varint  surface_len  (byte length of UTF-8 surface)
+#     bytes   surface_utf8
 
-def _enc_symbol_table(d: Dict[str, Tuple[int, int]]) -> bytes:
+def _enc_symbol_table(d: Dict[str, str]) -> bytes:
     blob = bytearray()
-    # keys are guaranteed §E0, §E1, ... §E{n-1} — encode count + pairs
-    entries = sorted(d.items(), key=lambda kv: int(kv[0][2:]))
+    # Sort by type then index for stable output
+    entries: List[Tuple[int, int, str]] = []
+    for key, surface in d.items():
+        if key.startswith("\u00a7E"):
+            try:
+                idx = int(key[2:])
+                entries.append((0, idx, surface))
+            except ValueError:
+                pass
+        elif key.startswith("\u00a7R"):
+            try:
+                idx = int(key[2:])
+                entries.append((1, idx, surface))
+            except ValueError:
+                pass
+    entries.sort()
     blob.extend(_enc_varint(len(entries)))
-    for _key, (offset, length) in entries:
-        blob.extend(_enc_varint(offset))
-        blob.extend(_enc_varint(length))
+    for key_type, key_index, surface in entries:
+        surface_bytes = surface.encode("utf-8")
+        blob.append(key_type)
+        blob.extend(_enc_varint(key_index))
+        blob.extend(_enc_varint(len(surface_bytes)))
+        blob.extend(surface_bytes)
     crc = zlib.crc32(bytes(blob)) & 0xFFFFFFFF
     blob.extend(struct.pack("<I", crc))
     return bytes(blob)
 
-def _dec_symbol_table(blob: bytes) -> Dict[str, Tuple[int, int]]:
+
+def _dec_symbol_table(blob: bytes) -> Dict[str, str]:
     stored   = struct.unpack("<I", blob[-4:])[0]
     computed = zlib.crc32(blob[:-4]) & 0xFFFFFFFF
     if stored != computed:
         raise ValueError("symbol_table: CRC mismatch")
     it  = iter(blob[:-4])
     n   = _dec_varint(it)
-    out: Dict[str, Tuple[int, int]] = {}
-    for i in range(n):
-        offset = _dec_varint(it)
-        length = _dec_varint(it)
-        out[f"\u00a7E{i}"] = (offset, length)
+    out: Dict[str, str] = {}
+    for _ in range(n):
+        key_type  = next(it)
+        key_index = _dec_varint(it)
+        surf_len  = _dec_varint(it)
+        surf_bytes = bytes(next(it) for _ in range(surf_len))
+        surface   = surf_bytes.decode("utf-8")
+        prefix    = "\u00a7E" if key_type == 0 else "\u00a7R"
+        out[f"{prefix}{key_index}"] = surface
     return out
 
 # ---- mode: model_weights (list[float], always 3 elements) ---------------
@@ -584,7 +616,7 @@ def encode_metadata(meta: Dict[str, Any]) -> bytes:
     _field(FIELD_COMPRESSED_BITSTREAM, bytes(meta["compressed_bitstream"]))
     _field(FIELD_POS_DELTAS_BITSTREAM, bytes(meta["pos_deltas_bitstream"]))
 
-    # Symbol table
+    # Symbol table — values are plain strings, not tuples
     _field(FIELD_SYMBOL_TABLE, _enc_symbol_table(meta.get("symbol_table", {})))
 
     # pos_deltas_counts: dict[int, int]
