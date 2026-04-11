@@ -37,7 +37,11 @@ from compression.pipeline.stage5_discourse_symbols import (
     decode_symbols,
     encode_symbols,
 )
-from compression.pipeline.stage5_encode import CharacterEncoder, StructuralEncoder
+from compression.pipeline.stage5_encode import (
+    CharacterEncoder,
+    StructuralEncoder,
+    apply_case_flag,
+)
 from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.stage7_arithmetic import ArithmeticDecoder, ArithmeticEncoder
 from compression.pipeline.stage9_autocorrect import autocorrect
@@ -218,7 +222,7 @@ def _flatten(nested: List[List[Any]]) -> List[Any]:
 
 _ATTACH_LEFT  = set(".,;:!?)'-—%-/")
 _ATTACH_RIGHT = set("($#/")
-_OPEN_QUOTE_AFTER = set("!?(— ")
+_OPEN_QUOTE_AFTER = set("!?(\u2014 ")
 
 
 def _join_words(words: list[str]) -> str:
@@ -260,7 +264,7 @@ def _join_words(words: list[str]) -> str:
     result = "".join(parts)
     result = result.replace("( ", "(").replace(" )", ")")
     result = result.replace("[ ", "[").replace(" ]", "]")
-    result = result.replace(" — ", "—")
+    result = result.replace(" \u2014 ", "\u2014")
     return result.strip()
 
 
@@ -396,7 +400,7 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
     orig_len = len(normalized)
     disc_len = len(discourse_compressed)
     print(
-        f"[Stage 4+5] Text length: {orig_len} → {disc_len} "
+        f"[Stage 4+5] Text length: {orig_len} \u2192 {disc_len} "
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
@@ -413,6 +417,8 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
     pos_tags:              List[List[str]]  = []
     morph_codes:           List[List[int]]  = []
     root_lengths:          List[List[int]]  = []
+    case_flags:            List[List[int]]  = []
+    case_bitmaps:          List[List[int]]  = []
 
     for sentence in encoded_sentences:
         char_classes.extend(sentence.get("char_classes", []))
@@ -423,6 +429,8 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
         pos_tags.append(sentence.get("pos_tags", []))
         morph_codes.append(sentence.get("morph_codes", []))
         root_lengths.append([len(root) for root in sentence.get("roots", [])])
+        case_flags.append([int(f) for f in sentence.get("case_flags", [])])
+        case_bitmaps.append([int(b) for b in sentence.get("case_bitmaps", [])])
 
     arith_enc = ArithmeticEncoder()
     compressed_bytes = arith_enc.encode(
@@ -448,6 +456,9 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
         "pos_tags":              pos_tags,
         "morph_codes":           morph_codes,
         "root_lengths":          root_lengths,
+        # case restoration (new)
+        "case_flags":            case_flags,
+        "case_bitmaps":          case_bitmaps,
         # context model
         "model_weights":  context_model.weights,
         "char_context":   {int(k): dict(v) for k, v in context_model.char_context.items()},
@@ -524,13 +535,19 @@ def decompress(input_path: str) -> str:
         char_stream     = _reconstruct_chars(char_classes, pos_deltas, sentence_counts)
         roots           = _split_roots(char_stream)
 
-        morph_codes_flat = _flatten(payload.get("morph_codes", []))
-        words = [
-            apply_morph(root, morph_codes_flat[idx] if idx < len(morph_codes_flat) else 0)
-            for idx, root in enumerate(roots)
-        ]
+        morph_codes_flat  = _flatten(payload.get("morph_codes", []))
+        case_flags_flat   = _flatten(payload.get("case_flags", []))
+        case_bitmaps_flat = _flatten(payload.get("case_bitmaps", []))
+
+        words = []
+        for idx, root in enumerate(roots):
+            morph_code = morph_codes_flat[idx] if idx < len(morph_codes_flat) else 0
+            flag       = case_flags_flat[idx]   if idx < len(case_flags_flat)   else 0
+            bitmap     = case_bitmaps_flat[idx] if idx < len(case_bitmaps_flat) else 0
+            surface    = apply_morph(root, morph_code)
+            words.append(apply_case_flag(surface, flag, bitmap))
+
         result = _join_words(words)
-        result = result[0].upper() + result[1:] if result else result
 
         if symbol_table:
             result = decode_symbols(result, symbol_table)
@@ -561,7 +578,7 @@ def analyse(text: str, model: str | None = None) -> None:
     comp_tokens = len(discourse_compressed.split())
     print(f"[Stage 4+5] Symbols: {len(symbol_table)}")
     print(
-        f"[Stage 4+5] Token reduction: {orig_tokens} → {comp_tokens} "
+        f"[Stage 4+5] Token reduction: {orig_tokens} \u2192 {comp_tokens} "
         f"({100*(orig_tokens-comp_tokens)/orig_tokens:.2f}%)"
     )
 

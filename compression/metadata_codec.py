@@ -30,6 +30,8 @@ Field IDs (FIELD_*):
    18  NUM_SYMBOLS            mode scalar
    19  NUM_CHAR_CLASSES       mode scalar
    20  POS_FREQ_TABLE         mode pos_freq
+   21  CASE_FLAGS             mode int_nested  (per-sentence list[list[int]], values 0-3)
+   22  CASE_BITMAPS           mode int_nested  (per-sentence list[list[int]], mixed-case bitmaps)
 """
 
 from __future__ import annotations
@@ -63,6 +65,8 @@ FIELD_POS_VOCAB             = 17
 FIELD_NUM_SYMBOLS           = 18
 FIELD_NUM_CHAR_CLASSES      = 19
 FIELD_POS_FREQ_TABLE        = 20
+FIELD_CASE_FLAGS            = 21
+FIELD_CASE_BITMAPS          = 22
 
 MAGIC   = b"LEXI"
 VERSION = 0x01
@@ -689,6 +693,10 @@ def encode_metadata(meta: Dict[str, Any]) -> bytes:
     pft = {str(k): int(v) for k, v in meta.get("pos_freq_table", {}).items()}
     _field(FIELD_POS_FREQ_TABLE, _enc_pos_freq(pft))
 
+    # Case flags and bitmaps (new fields 21 & 22)
+    _field(FIELD_CASE_FLAGS,   _enc_int_nested([[int(x) for x in s] for s in meta.get("case_flags",   [])]))
+    _field(FIELD_CASE_BITMAPS, _enc_int_nested([[int(x) for x in s] for s in meta.get("case_bitmaps", [])]))
+
     return bytes(parts)
 
 
@@ -749,6 +757,13 @@ def decode_metadata(data: bytes) -> Dict[str, Any]:
 
     pft_blob = _get(FIELD_POS_FREQ_TABLE)
     meta["pos_freq_table"] = _dec_pos_freq(pft_blob) if pft_blob else {}
+
+    # Case flags and bitmaps (fields 21 & 22) — optional for back-compat
+    cf_blob = _get(FIELD_CASE_FLAGS)
+    meta["case_flags"] = _dec_int_nested(cf_blob) if cf_blob else []
+
+    cb_blob = _get(FIELD_CASE_BITMAPS)
+    meta["case_bitmaps"] = _dec_int_nested(cb_blob) if cb_blob else []
 
     return meta
 

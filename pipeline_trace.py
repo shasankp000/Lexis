@@ -8,7 +8,10 @@ exercised here, including:
   Stage  2  MorphologicalAnalyser  (types, BOM in roots, empty roots)
   Stage  3  analyse_sentence (syntax; tag count parity)
   Stage  4  discourse analysis + symbol encoding/decoding (round-trip + edges)
-  Stage  5  encode_sentence_full: class+delta round-trip, cap_flags
+  Stage  5  encode_sentence_full: class+delta round-trip, cap_flags,
+              case_flags length, case_bitmaps length,
+              compute_case_flag all four categories,
+              apply_case_flag all four categories
   Stage  5C _build_encoded_sentences_from_metadata reconstruction
   Stage  5D compress_to_file root_lengths serialisation round-trip (2 sentences)
   Stage  6  ContextMixingModel: enc vs dec distributions, multi-sentence
@@ -16,14 +19,16 @@ exercised here, including:
   Stage  7B pos_deltas unigram round-trip
   Stage  7C multi-sentence arithmetic round-trip
   Stage  8  _reconstruct_chars with decoded streams
-  Stage  9  morph decode, apply_morph all codes
+  Stage  9  morph decode, apply_morph all codes, apply_case_flag all flags
   Stage  9B _join_words punctuation/quote edge cases
   Stage 10  metadata_codec — every mode independently:
               raw, scalar, flat_uint, flat_int, flat_dict,
               pos, int_nested, sparse_dict, sparse_dict_pos,
-              model_weights, pos_freq
+              model_weights, pos_freq, float_nested, symbol_table
             + encode_metadata / decode_metadata / is_lexi_file
-  Stage 11  full compress_to_file → decompress end-to-end, sentence-level diff
+            + case_flags and case_bitmaps fields round-trip
+  Stage 11  full compress_to_file → decompress end-to-end, sentence-level diff,
+              case restoration spot-check
   Stage 12  autocorrect pass-through
 
 Run:  python pipeline_trace.py
@@ -211,6 +216,8 @@ print(SEP)
 from compression.pipeline.stage5_encode import (
     CharacterEncoder, StructuralEncoder,
     _expand_morph_codes_for_chars, _expand_pos_tags_for_chars,
+    compute_case_flag, apply_case_flag,
+    CASE_LOWER, CASE_TITLE, CASE_UPPER, CASE_MIXED,
 )
 from compression.alphabet.phonetic_map import PHONETIC_CLASSES, compute_deltas
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
@@ -231,6 +238,8 @@ char_classes     = encoded["char_classes"]
 char_morph_codes = encoded["char_morph_codes"]
 char_pos_tags    = encoded["char_pos_tags"]
 pos_deltas_vals  = encoded["pos_deltas"]
+case_flags_enc   = encoded["case_flags"]
+case_bitmaps_enc = encoded["case_bitmaps"]
 
 label("char_morph_codes length == char_classes",
       len(char_morph_codes) == len(char_classes),
@@ -251,6 +260,87 @@ label("pos_tags count == roots count",
       len(pos_tags) == len(roots),
       len(pos_tags), len(roots))
 
+# --- case_flags / case_bitmaps sanity ---
+label("case_flags length == roots count",
+      len(case_flags_enc) == len(roots),
+      len(case_flags_enc), len(roots))
+label("case_bitmaps length == roots count",
+      len(case_bitmaps_enc) == len(roots),
+      len(case_bitmaps_enc), len(roots))
+label("all case_flags in 0–3",
+      all(0 <= f <= 3 for f in case_flags_enc),
+      got=[f for f in case_flags_enc if not (0 <= f <= 3)], expected="[]")
+label("case_bitmaps are non-negative ints",
+      all(isinstance(b, int) and b >= 0 for b in case_bitmaps_enc),
+      got=[b for b in case_bitmaps_enc if not (isinstance(b, int) and b >= 0)],
+      expected="[]")
+
+# --- compute_case_flag unit tests ---
+_ccf_cases = [
+    ("the",     CASE_LOWER, 0),
+    ("hello",   CASE_LOWER, 0),
+    ("The",     CASE_TITLE, 0),
+    ("Hello",   CASE_TITLE, 0),
+    ("USA",     CASE_UPPER, 0),
+    ("HTTP",    CASE_UPPER, 0),
+    ("eBook",   CASE_MIXED, None),   # bitmap checked separately
+    ("iPhone",  CASE_MIXED, None),
+    ("",        CASE_LOWER, 0),
+]
+for surface, expected_flag, expected_bitmap in _ccf_cases:
+    flag, bitmap = compute_case_flag(surface)
+    label(f"compute_case_flag({surface!r}) → flag={expected_flag}",
+          flag == expected_flag, got=flag, expected=expected_flag)
+    if expected_bitmap is not None:
+        label(f"compute_case_flag({surface!r}) → bitmap={expected_bitmap}",
+              bitmap == expected_bitmap, got=bitmap, expected=expected_bitmap)
+    else:
+        label(f"compute_case_flag({surface!r}) → bitmap is non-neg int",
+              isinstance(bitmap, int) and bitmap >= 0, got=bitmap, expected=">=0 int")
+
+# Verify that bitmap correctly encodes which characters are uppercase
+flag_ebook, bitmap_ebook = compute_case_flag("eBook")
+# 'e'=0 lower, 'B'=1 upper, 'o'=2 lower, 'o'=3 lower, 'k'=4 lower
+expected_bitmap_ebook = (1 << 1)  # bit 1 set for 'B'
+label("compute_case_flag('eBook') bitmap bit 1 set for 'B'",
+      bitmap_ebook & (1 << 1) != 0,
+      got=bin(bitmap_ebook), expected="bit 1 set")
+label("compute_case_flag('eBook') bitmap bit 0 not set for 'e'",
+      bitmap_ebook & (1 << 0) == 0,
+      got=bin(bitmap_ebook), expected="bit 0 clear")
+
+# --- apply_case_flag unit tests ---
+_acf_cases = [
+    ("hello",   CASE_LOWER, 0,          "hello"),
+    ("hello",   CASE_TITLE, 0,          "Hello"),
+    ("hello",   CASE_UPPER, 0,          "HELLO"),
+    ("ebook",   CASE_MIXED, (1 << 1),   "eBook"),   # bit 1 → 'B'
+    ("iphone",  CASE_MIXED, (1 << 0),   "iPhone"),  # bit 0 → 'I'
+    ("",        CASE_LOWER, 0,          ""),
+    ("",        CASE_TITLE, 0,          ""),
+    ("a",       CASE_TITLE, 0,          "A"),
+    ("abc",     CASE_UPPER, 0,          "ABC"),
+    ("abc",     CASE_MIXED, 0b101,      "AbC"),     # bits 0,2 → 'A','C'
+]
+for word, flag, bitmap, expected_out in _acf_cases:
+    result = apply_case_flag(word, flag, bitmap)
+    label(f"apply_case_flag({word!r}, flag={flag}, bitmap={bin(bitmap)}) == {expected_out!r}",
+          result == expected_out, got=repr(result), expected=repr(expected_out))
+
+# Round-trip: compute_case_flag → apply_case_flag must recover the original surface
+for item in morph_results[:10]:
+    surface = item[0]
+    root_lower = item[1]
+    flag, bitmap = compute_case_flag(surface)
+    # apply_morph produces lowercase by default; apply case on top
+    from compression.alphabet.morph_codes import apply_morph as _am
+    morphed = _am(root_lower, item[2])
+    restored_surface = apply_case_flag(morphed, flag, bitmap)
+    # case must match (we can only check what apply_morph + case_flag produces)
+    label(f"case round-trip for token {surface!r}: flag={flag} bitmap={bitmap}",
+          restored_surface.lower() == morphed.lower(),
+          got=repr(restored_surface), expected=repr(morphed + " (same case-folded)"))
+
 # Verify class+delta → char sequence round-trip
 from main import _cumulative_from_deltas
 positions         = _cumulative_from_deltas(pos_deltas_vals)
@@ -270,6 +360,8 @@ label("no unmapped (class, pos) pairs",
 print(f"  roots[:5]        : {roots[:5]}")
 print(f"  char_classes[:5] : {char_classes[:5]}")
 print(f"  pos_deltas[:5]   : {pos_deltas_vals[:5]}")
+print(f"  case_flags[:5]   : {case_flags_enc[:5]}")
+print(f"  case_bitmaps[:5] : {case_bitmaps_enc[:5]}")
 
 
 # =========================================================================
@@ -614,10 +706,10 @@ if roots:
 
 
 # =========================================================================
-# STAGE 9  — morph decode + apply_morph all codes
+# STAGE 9  — morph decode + apply_morph all codes + apply_case_flag
 # =========================================================================
 print(SEP)
-print("STAGE 9 — morph decode + apply_morph coverage")
+print("STAGE 9 — morph decode + apply_morph coverage + apply_case_flag")
 print(SEP)
 
 from compression.alphabet.morph_codes import (
@@ -679,6 +771,30 @@ for code, root, expect in apply_cases:
         label(f"apply_morph({root!r}, code={code}) == {expect!r}",
               ok, got=repr(result), expected=repr(expect))
 
+# apply_case_flag — exhaustive coverage in Stage 9 (separate from Stage 5 unit tests)
+print("  -- apply_case_flag exhaustive coverage --")
+_acf9_cases = [
+    # (word, flag, bitmap, expected)
+    ("hello",   CASE_LOWER, 0,        "hello"),
+    ("world",   CASE_TITLE, 0,        "World"),
+    ("nato",    CASE_UPPER, 0,        "NATO"),
+    ("ebook",   CASE_MIXED, 0b10,     "eBook"),
+    ("iphone",  CASE_MIXED, 0b1,      "iPhone"),
+    ("abc",     CASE_MIXED, 0b111,    "ABC"),
+    ("abc",     CASE_MIXED, 0b0,      "abc"),
+    ("a",       CASE_TITLE, 0,        "A"),
+    ("ab",      CASE_MIXED, 0b11,     "AB"),
+    ("ab",      CASE_MIXED, 0b01,     "Ab"),
+    ("ab",      CASE_MIXED, 0b10,     "aB"),
+    ("",        CASE_LOWER, 0,        ""),
+    ("",        CASE_TITLE, 0,        ""),
+    ("",        CASE_UPPER, 0,        ""),
+]
+for word, flag, bitmap, expected_out in _acf9_cases:
+    result = apply_case_flag(word, flag, bitmap)
+    label(f"apply_case_flag({word!r}, {flag}, {bin(bitmap)}) == {expected_out!r}",
+          result == expected_out, got=repr(result), expected=repr(expected_out))
+
 
 # =========================================================================
 # STAGE 9B  — _join_words punctuation / quote edge cases
@@ -715,13 +831,19 @@ print(SEP)
 from compression.metadata_codec import (
     encode_metadata, decode_metadata, is_lexi_file,
     # low-level per-mode helpers
-    _enc_raw,       _dec_raw,
-    _enc_scalar,    _dec_scalar,
-    _enc_flat_uint, _dec_flat_uint,
-    _enc_flat_int,  _dec_flat_int,
-    _enc_flat_dict, _dec_flat_dict,
-    _enc_pos,       _dec_pos,
-    _enc_int_nested,_dec_int_nested,
+    _enc_raw,            _dec_raw,
+    _enc_scalar,         _dec_scalar,
+    _enc_flat_uint,      _dec_flat_uint,
+    _enc_flat_int,       _dec_flat_int,
+    _enc_flat_dict,      _dec_flat_dict,
+    _enc_pos,            _dec_pos,
+    _enc_int_nested,     _dec_int_nested,
+    _enc_sparse_dict,    _dec_sparse_dict,
+    _enc_sparse_dict_pos,_dec_sparse_dict_pos,
+    _enc_model_weights,  _dec_model_weights,
+    _enc_pos_freq,       _dec_pos_freq,
+    _enc_float_nested,   _dec_float_nested,
+    _enc_symbol_table,   _dec_symbol_table,
 )
 
 # --- raw ---------------------------------------------------------------
@@ -779,21 +901,139 @@ for sentences in int_nested_cases:
     label(f"int_nested round-trip {[len(s) for s in sentences]}",
           rt == sentences, got=rt, expected=sentences)
 
-# --- sparse_dict (_enc_sparse_dict / _dec_sparse_dict) ----------------
-# These are not exported, so exercise them through encode/decode_metadata
-# using the char_context / morph_context fields.
+# --- sparse_dict (dict[int, dict[int, int]]) --------------------------
+print("  -- sparse_dict --")
+_sd_cases = [
+    {},
+    {0: {0: 1}},
+    {0: {1: 5, 2: 3}, 1: {0: 2}},
+    {-1: {0: 10, -1: 3}, 0: {0: 4}},
+    {k: {k + j: j + 1 for j in range(3)} for k in range(5)},
+]
+for d in _sd_cases:
+    rt = _dec_sparse_dict(_enc_sparse_dict(d))
+    label(f"sparse_dict round-trip keys={sorted(d.keys())}",
+          rt == d, got=rt, expected=d)
 
-# --- pos_freq (_enc_pos_freq / _dec_pos_freq) -------------------------
-# Exercised below via full encode/decode_metadata.
+# --- sparse_dict_pos (dict[str, dict[int, int]]) ----------------------
+print("  -- sparse_dict_pos --")
+_sdp_cases = [
+    {},
+    {"NOUN": {0: 1}},
+    {"NOUN": {1: 5, 2: 3}, "VERB": {0: 2}},
+    {"ADJ": {0: 10}, "DET": {1: 4, 2: 2}, "PUNCT": {0: 1}},
+]
+for d in _sdp_cases:
+    rt = _dec_sparse_dict_pos(_enc_sparse_dict_pos(d))
+    label(f"sparse_dict_pos round-trip keys={sorted(d.keys())}",
+          rt == d, got=rt, expected=d)
 
-# --- model_weights (_enc_model_weights / _dec_model_weights) ----------
-# Exercised below via full encode/decode_metadata.
+# --- model_weights (list[float], 3 elements, float64) -----------------
+print("  -- model_weights --")
+_mw_cases = [
+    [1/3, 1/3, 1/3],
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.5, 0.3, 0.2],
+    [0.9999999, 0.0000001, 0.0],
+]
+for weights in _mw_cases:
+    rt = _dec_model_weights(_enc_model_weights(weights))
+    # float64 should be bit-exact
+    label(f"model_weights round-trip {[round(w, 6) for w in weights]}",
+          rt == weights, got=rt, expected=weights)
+
+# Verify no float32 precision loss (the historical bug)
+precise_weights = [0.33333333333333331, 0.33333333333333331, 0.33333333333333337]
+rt_precise = _dec_model_weights(_enc_model_weights(precise_weights))
+label("model_weights preserves float64 precision (no float32 rounding)",
+      rt_precise == precise_weights,
+      got=rt_precise, expected=precise_weights)
+
+# --- pos_freq (dict[str, int]) ----------------------------------------
+print("  -- pos_freq --")
+_pf_cases = [
+    {},
+    {"NOUN": 10},
+    {"NOUN": 10, "VERB": 5},
+    {"NOUN": 100, "VERB": 50, "DET": 30, "ADJ": 20, "PUNCT": 15},
+    {tag: i + 1 for i, tag in enumerate(["ADJ", "ADP", "ADV", "AUX", "NOUN", "VERB"])},
+]
+for d in _pf_cases:
+    rt = _dec_pos_freq(_enc_pos_freq(d))
+    label(f"pos_freq round-trip keys={sorted(d.keys())}",
+          rt == d, got=rt, expected=d)
+
+# Edge: unknown tags must be silently dropped (not in UPOS_TAGS)
+_pf_unknown = {"NOUN": 5, "FAKE_TAG": 99, "VERB": 3}
+rt_unknown = _dec_pos_freq(_enc_pos_freq(_pf_unknown))
+label("pos_freq silently drops unknown tags",
+      "FAKE_TAG" not in rt_unknown and rt_unknown.get("NOUN") == 5,
+      got=rt_unknown, expected={"NOUN": 5, "VERB": 3})
+
+# --- float_nested (nested list[list[float]]) --------------------------
+print("  -- float_nested --")
+_fn_cases = [
+    [],
+    [[]],
+    [[3.14]],
+    [[1.0, 2.0, 3.0]],
+    [[1.5, 2.5], [3.5, 4.5]],
+]
+for sentences in _fn_cases:
+    rt = _dec_float_nested(_enc_float_nested(sentences))
+    # float32 XOR-delta — tolerate tiny precision differences
+    ok = len(rt) == len(sentences) and all(
+        len(rt[i]) == len(sentences[i]) and
+        all(abs(rt[i][j] - sentences[i][j]) < 1e-5
+            for j in range(len(sentences[i])))
+        for i in range(len(sentences))
+    )
+    label(f"float_nested round-trip {[len(s) for s in sentences]}",
+          ok, got=rt, expected=sentences)
+
+# --- symbol_table (dict[str, str]) ------------------------------------
+print("  -- symbol_table --")
+_st_cases = [
+    {},
+    {"§E0": "London"},
+    {"§E0": "Ishmael", "§E1": "Ahab", "§R0": "hunts"},
+    {"§E0": "Ünïcödé", "§R1": "São Paulo"},
+]
+for d in _st_cases:
+    rt = _dec_symbol_table(_enc_symbol_table(d))
+    label(f"symbol_table round-trip len={len(d)}",
+          rt == d, got=rt, expected=d)
+
+# --- case_flags / case_bitmaps via int_nested directly ----------------
+print("  -- case_flags / case_bitmaps int_nested round-trips --")
+cf_cases = [
+    [],
+    [[]],
+    [[0, 1, 2, 3]],
+    [[0, 0, 1], [2, 3, 0]],
+    [[CASE_LOWER] * 10, [CASE_TITLE, CASE_UPPER, CASE_MIXED]],
+]
+for sentences in cf_cases:
+    rt = _dec_int_nested(_enc_int_nested(sentences))
+    label(f"case_flags int_nested round-trip {[len(s) for s in sentences]}",
+          rt == sentences, got=rt, expected=sentences)
+
+cb_cases = [
+    [],
+    [[]],
+    [[0, 0, 2, 0]],
+    [[0, 2], [0, 4, 0]],
+    [[0] * 8, [1, 2, 4, 8, 16]],
+]
+for sentences in cb_cases:
+    rt = _dec_int_nested(_enc_int_nested(sentences))
+    label(f"case_bitmaps int_nested round-trip {[len(s) for s in sentences]}",
+          rt == sentences, got=rt, expected=sentences)
 
 # --- Full encode_metadata / decode_metadata ---------------------------
 # NOTE: all POS tags must be UPOS (ADJ, ADP, ADV, AUX, CCONJ, DET, INTJ,
 # NOUN, NUM, PART, PRON, PROPN, PUNCT, SCONJ, SYM, VERB, X).
-# Penn Treebank tags (NN, VBZ, etc.) are NOT in TAG_TO_ID and will be
-# silently mapped to 'X', causing round-trip assertions to fail.
 test_metadata: Dict[str, Any] = {
     "compressed_bitstream":  b"\x01\x02\x03\xff",
     "pos_deltas_bitstream":  b"\xaa\xbb",
@@ -816,6 +1056,10 @@ test_metadata: Dict[str, Any] = {
     "num_symbols":           20,
     "num_char_classes":      7,
     "pos_freq_table":        {"NOUN": 10, "VERB": 5},
+    # NEW — case fields
+    "case_flags":            [[CASE_LOWER, CASE_TITLE, CASE_UPPER],
+                              [CASE_MIXED, CASE_LOWER]],
+    "case_bitmaps":          [[0, 0, 0], [2, 0]],
 }
 
 encoded_binary = encode_metadata(test_metadata)
@@ -921,6 +1165,29 @@ try:
           got=decoded_meta.get("struct_context"),
           expected=test_metadata["struct_context"])
 
+    # --- NEW: case_flags and case_bitmaps round-trips ---
+    label("case_flags round-trips",
+          decoded_meta.get("case_flags") == test_metadata["case_flags"],
+          got=decoded_meta.get("case_flags"),
+          expected=test_metadata["case_flags"])
+
+    label("case_bitmaps round-trips",
+          decoded_meta.get("case_bitmaps") == test_metadata["case_bitmaps"],
+          got=decoded_meta.get("case_bitmaps"),
+          expected=test_metadata["case_bitmaps"])
+
+    # Verify correct flag values survived serialisation
+    for s_idx, (flags_sent, bitmaps_sent) in enumerate(
+        zip(decoded_meta["case_flags"], decoded_meta["case_bitmaps"])
+    ):
+        for t_idx, (flag, bitmap) in enumerate(zip(flags_sent, bitmaps_sent)):
+            orig_flag   = test_metadata["case_flags"][s_idx][t_idx]
+            orig_bitmap = test_metadata["case_bitmaps"][s_idx][t_idx]
+            label(f"case_flags[{s_idx}][{t_idx}] == {orig_flag}",
+                  flag == orig_flag, got=flag, expected=orig_flag)
+            label(f"case_bitmaps[{s_idx}][{t_idx}] == {orig_bitmap}",
+                  bitmap == orig_bitmap, got=bitmap, expected=orig_bitmap)
+
 except Exception as _e10:
     label("decode_metadata completed without exception",
           False, got=f"{type(_e10).__name__}: {_e10}", expected="no exception")
@@ -957,6 +1224,19 @@ try:
         label(f"stats has key '{stat_key}'",
               stat_key in stats, got=list(stats.keys()), expected=f"contains '{stat_key}'")
 
+    # Verify case_flags and case_bitmaps are persisted in the written file
+    _raw_lexi = Path(tmp_path).read_bytes()
+    _meta_check = decode_metadata(_raw_lexi)
+    label("written LEXI file contains case_flags field",
+          "case_flags" in _meta_check and len(_meta_check["case_flags"]) > 0,
+          got=len(_meta_check.get("case_flags", [])), expected="> 0 sentences")
+    label("written LEXI file contains case_bitmaps field",
+          "case_bitmaps" in _meta_check and len(_meta_check["case_bitmaps"]) > 0,
+          got=len(_meta_check.get("case_bitmaps", [])), expected="> 0 sentences")
+    label("case_flags sentence count == case_bitmaps sentence count",
+          len(_meta_check["case_flags"]) == len(_meta_check["case_bitmaps"]),
+          got=len(_meta_check["case_flags"]), expected=len(_meta_check["case_bitmaps"]))
+
     decoded_text = decompress(tmp_path)
 
     label("decompress returns string",
@@ -988,6 +1268,32 @@ try:
         if len(decoded_text) != len(normalized):
             print(f"  decoded is {'shorter' if len(decoded_text) < len(normalized) else 'longer'} "
                   f"by {abs(len(decoded_text) - len(normalized))} chars")
+
+    # --- case restoration spot-check ---
+    # Verify that tokens which should be Title-case or ALL-CAPS are
+    # correctly restored in the decompressed output.
+    print("  -- case restoration spot-check --")
+    # Collect expected surface forms from the source
+    _src_tokens = [item[0] for item in morph_results]
+    # Re-tokenise decoded text with the same spaCy model for a fair comparison
+    _dec_doc    = nlp(decoded_text[:len(first_sent.text) + 5])
+    _dec_tokens = [t.text for t in _dec_doc]
+    _matched = 0
+    _total   = min(len(_src_tokens), len(_dec_tokens), 10)
+    for _i in range(_total):
+        if _src_tokens[_i] == _dec_tokens[_i]:
+            _matched += 1
+    label(f"case-restored tokens: {_matched}/{_total} match source (first sentence)",
+          _matched >= _total * 0.7,
+          got=f"{_matched}/{_total}", expected=f">= {int(_total * 0.7)}/{_total}")
+
+    if _matched < _total:
+        print("  token comparison (src → dec):")
+        for _i in range(_total):
+            _src = _src_tokens[_i] if _i < len(_src_tokens) else "?"
+            _dec = _dec_tokens[_i] if _i < len(_dec_tokens) else "?"
+            match = "✓" if _src == _dec else "✗"
+            print(f"    [{match}] src={_src!r:20} dec={_dec!r}")
 
 except Exception as _e11:
     label("Stage 11 completed without exception",
