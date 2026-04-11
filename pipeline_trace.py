@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List
@@ -314,10 +315,6 @@ print(SEP)
 print("STAGE 5D — compress_to_file root_lengths serialisation round-trip")
 print(SEP)
 
-# Simulate what compress_to_file packs into metadata for root_lengths/morph_codes/pos_tags
-# then verify _build_encoded_sentences_from_metadata reconstructs correctly
-# for a multi-sentence payload.
-
 # Build a second sentence so we have 2 sentences
 second_sent = all_sents[1] if len(all_sents) > 1 else first_sent
 morph2      = analyser.analyse_sentence(second_sent.text)
@@ -341,7 +338,6 @@ recon2 = _build_encoded_sentences_from_metadata(packed_payload)
 label("multi-sentence reconstruction: 2 sentences returned",
       len(recon2) == 2, len(recon2), 2)
 
-# For sentence 0: morph and pos must match what encode_sentence_full produced
 enc0_morph = encoded["char_morph_codes"]
 enc0_pos   = encoded["char_pos_tags"]
 label("sentence 0 morph matches",
@@ -351,7 +347,6 @@ label("sentence 0 pos matches",
       recon2[0]["char_pos_tags"] == enc0_pos,
       recon2[0]["char_pos_tags"][:10], enc0_pos[:10])
 
-# For sentence 1: similar check
 enc1_morph = encoded2["char_morph_codes"]
 enc1_pos   = encoded2["char_pos_tags"]
 label("sentence 1 morph matches",
@@ -371,7 +366,6 @@ print(SEP)
 
 from compression.pipeline.stage6_probability import ContextMixingModel
 
-# Build encoder-side and decoder-side fake sentences
 fake_sentence_enc = {
     "char_classes":     char_classes,
     "char_morph_codes": char_morph_codes,
@@ -400,7 +394,6 @@ cm_enc.train([fake_sentence_enc])
 cm_dec = ContextMixingModel()
 cm_dec.train([fake_sentence_dec])
 
-# Compare probability distributions at every position
 mismatches = 0
 for i in range(len(char_classes)):
     ctx_enc = {
@@ -429,7 +422,6 @@ for i in range(len(char_classes)):
 label("enc vs dec prob distributions match at all positions",
       mismatches == 0, f"{mismatches} mismatches", "0 mismatches")
 
-# Verify distributions are normalised (sum ≈ 1.0)
 ctx_test = {
     "char_history":       [],
     "current_morph_code": 0,
@@ -442,7 +434,6 @@ label("probability distribution sums to ~1.0",
       abs(total_prob - 1.0) < 1e-6,
       got=f"{total_prob:.8f}", expected="~1.0")
 
-# Multi-sentence training: train on both sentences, ensure no crash and vocab grows
 fake_s2_enc = {
     "char_classes":     encoded2["char_classes"],
     "char_morph_codes": encoded2["char_morph_codes"],
@@ -523,7 +514,6 @@ label("pos_deltas bitstream is bytes",
       isinstance(pd_bitstream, (bytes, bytearray)),
       type(pd_bitstream).__name__, "bytes")
 
-# Edge: single unique value
 single_stream = [3, 3, 3, 3]
 single_counts = Counter(single_stream)
 enc3  = ArithmeticEncoder()
@@ -586,7 +576,6 @@ label("_reconstruct_chars output matches expected",
       reconstructed == expected_seq2,
       repr(reconstructed[:60]), repr(expected_seq2[:60]))
 
-# Edge: empty inputs → empty string
 label("_reconstruct_chars on empty → empty string",
       _reconstruct_chars([], [], []) == "",
       got=_reconstruct_chars([], [], []), expected="")
@@ -622,10 +611,9 @@ label("final text (case-insensitive) matches source sentence",
       final_cap.lower() == expected_final.lower(),
       repr(final_cap[:80]), repr(expected_final[:80]))
 
-# apply_morph exhaustive code coverage
 apply_cases = [
     (BASE,         "run",    "run"),
-    (PLURAL,       "dog",    None),     # lemminflect, result must be non-empty str
+    (PLURAL,       "dog",    None),
     (PAST_TENSE,   "walk",   None),
     (PRESENT_PART, "run",    None),
     (PAST_PART,    "break",  None),
@@ -640,12 +628,12 @@ apply_cases = [
     (ADVERBIAL,    "happy",  "happily"),
     (ADVERBIAL,    "gentle", "gently"),
     (NEGATION,     "happy",  "unhappy"),
-    (NEGATION,     "unhappy","unhappy"),  # already prefixed → no double
+    (NEGATION,     "unhappy","unhappy"),
     (AGENT,        "run",    "runner"),
     (AGENT,        "write",  "writer"),
     (NOMINALIZE,   "dark",   "darkness"),
     (NOMINALIZE,   "kind",   "kindness"),
-    (IRREGULAR,    "go",     None),      # any non-empty string
+    (IRREGULAR,    "go",     None),
 ]
 
 for code, root, expect in apply_cases:
@@ -694,7 +682,6 @@ print(SEP)
 
 from compression.metadata_codec import encode_metadata, decode_metadata, is_lexi_file
 
-# Build a minimal but representative metadata dict (same structure as compress_to_file)
 test_metadata: Dict[str, Any] = {
     "compressed_bitstream":  b"\x01\x02\x03\xff",
     "pos_deltas_bitstream":  b"\xaa\xbb",
@@ -735,48 +722,57 @@ label("is_lexi_file rejects JSON",
       not is_lexi_file(b'{"key": "value"}'),
       got=True, expected=False)
 
-decoded_meta = decode_metadata(encoded_binary)
-label("decode_metadata returns dict",
-      isinstance(decoded_meta, dict), type(decoded_meta).__name__, "dict")
+# decode_metadata and all downstream key checks are wrapped so a codec
+# crash is recorded as a FAIL without aborting the rest of the trace.
+try:
+    decoded_meta = decode_metadata(encoded_binary)
+    label("decode_metadata returns dict",
+          isinstance(decoded_meta, dict), type(decoded_meta).__name__, "dict")
 
-# Check every key round-trips correctly
-for key in ["pos_deltas_count", "num_symbols", "num_char_classes"]:
-    label(f"scalar field '{key}' round-trips",
-          decoded_meta.get(key) == test_metadata[key],
-          got=decoded_meta.get(key), expected=test_metadata[key])
+    for key in ["pos_deltas_count", "num_symbols", "num_char_classes"]:
+        label(f"scalar field '{key}' round-trips",
+              decoded_meta.get(key) == test_metadata[key],
+              got=decoded_meta.get(key), expected=test_metadata[key])
 
-label("compressed_bitstream round-trips",
-      bytes(decoded_meta["compressed_bitstream"]) == test_metadata["compressed_bitstream"],
-      got=bytes(decoded_meta["compressed_bitstream"]),
-      expected=test_metadata["compressed_bitstream"])
+    label("compressed_bitstream round-trips",
+          bytes(decoded_meta["compressed_bitstream"]) == test_metadata["compressed_bitstream"],
+          got=bytes(decoded_meta["compressed_bitstream"]),
+          expected=test_metadata["compressed_bitstream"])
 
-label("symbol_table round-trips",
-      decoded_meta.get("symbol_table") == test_metadata["symbol_table"],
-      got=decoded_meta.get("symbol_table"), expected=test_metadata["symbol_table"])
+    label("symbol_table round-trips",
+          decoded_meta.get("symbol_table") == test_metadata["symbol_table"],
+          got=decoded_meta.get("symbol_table"), expected=test_metadata["symbol_table"])
 
-label("pos_tags round-trips",
-      decoded_meta.get("pos_tags") == test_metadata["pos_tags"],
-      got=decoded_meta.get("pos_tags"), expected=test_metadata["pos_tags"])
+    label("pos_tags round-trips",
+          decoded_meta.get("pos_tags") == test_metadata["pos_tags"],
+          got=decoded_meta.get("pos_tags"), expected=test_metadata["pos_tags"])
 
-label("morph_codes round-trips",
-      decoded_meta.get("morph_codes") == test_metadata["morph_codes"],
-      got=decoded_meta.get("morph_codes"), expected=test_metadata["morph_codes"])
+    label("morph_codes round-trips",
+          decoded_meta.get("morph_codes") == test_metadata["morph_codes"],
+          got=decoded_meta.get("morph_codes"), expected=test_metadata["morph_codes"])
 
-label("root_lengths round-trips",
-      decoded_meta.get("root_lengths") == test_metadata["root_lengths"],
-      got=decoded_meta.get("root_lengths"), expected=test_metadata["root_lengths"])
+    label("root_lengths round-trips",
+          decoded_meta.get("root_lengths") == test_metadata["root_lengths"],
+          got=decoded_meta.get("root_lengths"), expected=test_metadata["root_lengths"])
 
-label("model_weights round-trips",
-      decoded_meta.get("model_weights") == test_metadata["model_weights"],
-      got=decoded_meta.get("model_weights"), expected=test_metadata["model_weights"])
+    label("model_weights round-trips",
+          decoded_meta.get("model_weights") == test_metadata["model_weights"],
+          got=decoded_meta.get("model_weights"), expected=test_metadata["model_weights"])
 
-label("char_vocab round-trips",
-      list(decoded_meta.get("char_vocab", [])) == test_metadata["char_vocab"],
-      got=decoded_meta.get("char_vocab"), expected=test_metadata["char_vocab"])
+    label("char_vocab round-trips",
+          list(decoded_meta.get("char_vocab", [])) == test_metadata["char_vocab"],
+          got=decoded_meta.get("char_vocab"), expected=test_metadata["char_vocab"])
 
-label("pos_freq_table round-trips",
-      decoded_meta.get("pos_freq_table") == test_metadata["pos_freq_table"],
-      got=decoded_meta.get("pos_freq_table"), expected=test_metadata["pos_freq_table"])
+    label("pos_freq_table round-trips",
+          decoded_meta.get("pos_freq_table") == test_metadata["pos_freq_table"],
+          got=decoded_meta.get("pos_freq_table"), expected=test_metadata["pos_freq_table"])
+
+except Exception as _e10:
+    label("decode_metadata completed without exception",
+          False, got=f"{type(_e10).__name__}: {_e10}", expected="no exception")
+    print("  traceback:")
+    for _line in traceback.format_exc().splitlines():
+        print(f"    {_line}")
 
 
 # =========================================================================
@@ -814,7 +810,6 @@ try:
           decoded_text == normalized,
           repr(decoded_text[:120]), repr(normalized[:120]))
 
-    # Show first character-level mismatch with sentence context
     if decoded_text != normalized:
         for i, (a, b) in enumerate(zip(decoded_text, normalized)):
             if a != b:
@@ -834,6 +829,12 @@ try:
             print(f"  decoded is {'shorter' if len(decoded_text) < len(normalized) else 'longer'} "
                   f"by {abs(len(decoded_text) - len(normalized))} chars")
 
+except Exception as _e11:
+    label("Stage 11 completed without exception",
+          False, got=f"{type(_e11).__name__}: {_e11}", expected="no exception")
+    print("  traceback:")
+    for _line in traceback.format_exc().splitlines():
+        print(f"    {_line}")
 finally:
     try:
         os.unlink(tmp_path)
@@ -854,18 +855,22 @@ autocorrect_cases = [
     "The quick brown fox jumps over the lazy dog.",
     "Hello world.",
     "It is a truth universally acknowledged.",
-    "",       # empty string must not crash
-    "A",      # single character
+    "",
+    "A",
 ]
 
 for case in autocorrect_cases:
     snippet = repr(case[:30])
-    result = autocorrect(case)
-    label(f"autocorrect({snippet}) returns str",
-          isinstance(result, str), type(result).__name__, "str")
-    if case:  # non-empty: must not destroy content entirely
-        label(f"autocorrect({snippet}) is non-empty",
-              len(result) > 0, got=len(result), expected="> 0")
+    try:
+        result = autocorrect(case)
+        label(f"autocorrect({snippet}) returns str",
+              isinstance(result, str), type(result).__name__, "str")
+        if case:
+            label(f"autocorrect({snippet}) is non-empty",
+                  len(result) > 0, got=len(result), expected="> 0")
+    except Exception as _eac:
+        label(f"autocorrect({snippet}) raises no exception",
+              False, got=f"{type(_eac).__name__}: {_eac}", expected="no exception")
 
 
 print(SEP)
