@@ -831,12 +831,7 @@ try:
                     pos += sent_len + 1
                 break
         if len(decoded_text) != len(normalized):
-            short, long_ = (
-                (decoded_text, normalized)
-                if len(decoded_text) < len(normalized)
-                else (normalized, decoded_text)
-            )
-            print(f"  decoded is {'shorter' if decoded_text < normalized else 'longer'} "
+            print(f"  decoded is {'shorter' if len(decoded_text) < len(normalized) else 'longer'} "
                   f"by {abs(len(decoded_text) - len(normalized))} chars")
 
 finally:
@@ -855,7 +850,6 @@ print(SEP)
 
 from compression.pipeline.stage9_autocorrect import autocorrect
 
-# autocorrect must not corrupt well-formed text
 autocorrect_cases = [
     "The quick brown fox jumps over the lazy dog.",
     "Hello world.",
@@ -865,11 +859,12 @@ autocorrect_cases = [
 ]
 
 for case in autocorrect_cases:
+    snippet = repr(case[:30])
     result = autocorrect(case)
-    label(f"autocorrect({case!r[:30]!r}) returns str",
+    label(f"autocorrect({snippet}) returns str",
           isinstance(result, str), type(result).__name__, "str")
     if case:  # non-empty: must not destroy content entirely
-        label(f"autocorrect({case!r[:30]!r}) is non-empty",
+        label(f"autocorrect({snippet}) is non-empty",
               len(result) > 0, got=len(result), expected="> 0")
 
 
