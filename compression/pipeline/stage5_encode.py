@@ -46,6 +46,8 @@ def compute_case_flag(surface: str) -> Tuple[int, int]:
     """
     if not surface:
         return CASE_LOWER, 0
+    if not any(ch.isalpha() for ch in surface):
+        return CASE_LOWER, 0
     if surface.islower():
         return CASE_LOWER, 0
     if surface.isupper():

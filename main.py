@@ -221,7 +221,7 @@ def _flatten(nested: List[List[Any]]) -> List[Any]:
 
 
 _ATTACH_LEFT  = set(".,;:!?)'-—%-/")
-_ATTACH_RIGHT = set("($#/")
+_ATTACH_RIGHT = set("($#/\"")
 _OPEN_QUOTE_AFTER = set("!?(\u2014 ")
 
 
@@ -241,6 +241,9 @@ def _join_words(words: list[str]) -> str:
                 parts.append(" " + word)
             continue
         if parts[-1].endswith(("-", "/")):
+            parts[-1] += word
+            continue
+        if parts[-1].endswith("'"):
             parts[-1] += word
             continue
         if parts[-1] and parts[-1][-1] in _ATTACH_RIGHT:
