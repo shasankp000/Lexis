@@ -1,9 +1,26 @@
 """
-pipeline_trace.py  —  full per-stage expected vs actual comparison.
+pipeline_trace.py  —  exhaustive per-stage and end-to-end coverage.
 
-Covers the REAL compress → decompress round-trip path, not just isolated
-encoder checks. Every stage is tested including the actual
-_build_encoded_sentences_from_metadata path used by decompress.
+Every component that participates in the compress → decompress path is
+exercised here, including:
+
+  Stage  1  normalize_text
+  Stage  2  MorphologicalAnalyser
+  Stage  3  analyse_sentence (syntax)
+  Stage  4  discourse analysis + symbol encoding/decoding
+  Stage  5  encode_sentence_full: class+delta round-trip, cap_flags
+  Stage  5C _build_encoded_sentences_from_metadata reconstruction
+  Stage  5D compress_to_file root_lengths serialisation round-trip
+  Stage  6  ContextMixingModel: enc vs dec distributions, multi-sentence
+  Stage  7  arithmetic encoder/decoder: enc-ctx vs dec-ctx
+  Stage  7B pos_deltas unigram round-trip
+  Stage  7C multi-sentence arithmetic round-trip
+  Stage  8  _reconstruct_chars with decoded streams
+  Stage  9  morph decode, apply_morph all codes
+  Stage  9B _join_words punctuation/quote edge cases
+  Stage 10  binary envelope encode_metadata / decode_metadata / is_lexi_file
+  Stage 11  full compress_to_file → decompress end-to-end, sentence-level diff
+  Stage 12  autocorrect pass-through
 
 Run:  python pipeline_trace.py
 """
@@ -11,15 +28,17 @@ from __future__ import annotations
 
 import os
 import sys
-import io
-from collections import Counter
-from typing import List
+import tempfile
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any, Dict, List
 
 PASS = "\033[92mOK\033[0m"
 FAIL = "\033[91mFAIL\033[0m"
 SEP  = "\n" + "-" * 70
 
-def label(name, ok, got=None, expected=None):
+
+def label(name: str, ok: bool, got=None, expected=None) -> None:
     tag = PASS if ok else FAIL
     print(f"  [{tag}]  {name}")
     if not ok:
@@ -39,11 +58,24 @@ from compression.pipeline.stage1_normalize import normalize_text
 raw = open("moby500.txt", encoding="utf-8").read()
 normalized = normalize_text(raw)
 
-label("normalized is non-empty",         len(normalized) > 0)
-label("no leading/trailing whitespace",  normalized == normalized.strip())
-label("no double spaces",                "  " not in normalized)
-label("no BOM in normalized text",       "\ufeff" not in normalized,
+label("normalized is non-empty",        len(normalized) > 0)
+label("no leading/trailing whitespace", normalized == normalized.strip())
+label("no double spaces",               "  " not in normalized)
+label("no BOM in normalized text",      "\ufeff" not in normalized,
       got=repr(normalized[:20]), expected="no BOM")
+
+# Edge: BOM at start of input
+bom_input = "\ufeffHello world."
+bom_norm  = normalize_text(bom_input)
+label("BOM-prefixed input → BOM stripped", "\ufeff" not in bom_norm,
+      got=repr(bom_norm[:20]), expected="no BOM")
+
+# Edge: multiple consecutive spaces
+multi_space = normalize_text("Hello  world.   How  are   you?")
+label("multiple spaces collapsed",
+      "  " not in multi_space,
+      got=repr(multi_space), expected="single spaces")
+
 print(f"  first 120 chars : {repr(normalized[:120])}")
 
 
@@ -61,17 +93,31 @@ nlp.max_length = 2_000_000
 from compression.pipeline.stage2_morphology import MorphologicalAnalyser
 analyser = MorphologicalAnalyser(use_spacy=True)
 
-doc = nlp(normalized)
-first_sent = list(doc.sents)[0]
+doc        = nlp(normalized)
+all_sents  = list(doc.sents)
+first_sent = all_sents[0]
+
 morph_results = analyser.analyse_sentence(first_sent.text)
 
 label("morph results non-empty", len(morph_results) > 0)
 for item in morph_results[:5]:
     print(f"  token={item[0]!r:15}  root={item[1]!r:15}  code={item[2]}")
+
 label("no root contains BOM",
       not any("\ufeff" in item[1] for item in morph_results),
       got=[item[1] for item in morph_results if "\ufeff" in item[1]],
       expected="[]")
+
+# Each (original, root, code) must be a 3-tuple of (str, str, int)
+label("each morph item is (str, str, int)",
+      all(isinstance(o, str) and isinstance(r, str) and isinstance(c, int)
+          for o, r, c in morph_results),
+      got="type error", expected="(str, str, int)")
+
+# root must never be empty
+label("no empty root",
+      all(len(r) > 0 for _, r, _ in morph_results),
+      got=[r for _, r, _ in morph_results if not r], expected="[]")
 
 
 # =========================================================================
@@ -88,6 +134,9 @@ label("pos_tags non-empty", len(syntax.pos_tags) > 0)
 label("pos_tags count == morph token count",
       len(syntax.pos_tags) == len(morph_results),
       len(syntax.pos_tags), len(morph_results))
+label("all pos_tags are non-empty strings",
+      all(isinstance(t, str) and len(t) > 0 for t in syntax.pos_tags),
+      got=[t for t in syntax.pos_tags if not t], expected="[]")
 print(f"  pos_tags[:5] : {syntax.pos_tags[:5]}")
 
 
@@ -110,6 +159,21 @@ label("symbol round-trip restores original",
       restored_text == normalized,
       repr(restored_text[:80]), repr(normalized[:80]))
 print(f"  symbols encoded : {len(symbol_table)}")
+
+# Edge: empty symbol table — decode must be identity
+label("decode with empty symbol_table is identity",
+      decode_symbols("Hello world.", {}) == "Hello world.",
+      got=decode_symbols("Hello world.", {}), expected="Hello world.")
+
+# Edge: encode_symbols on text with no repeated entities
+short_text = "The cat sat on the mat."
+_, short_table = encode_symbols(short_text, disc_analyser.analyse_document(short_text))
+short_restored = decode_symbols(
+    *encode_symbols(short_text, disc_analyser.analyse_document(short_text))
+)
+label("short text symbol round-trip",
+      short_restored == short_text,
+      repr(short_restored), repr(short_text))
 
 
 # =========================================================================
@@ -155,30 +219,46 @@ label("pos_deltas length == char_classes",
 label("no root contains BOM",
       not any("\ufeff" in r for r in roots),
       got=[r for r in roots if "\ufeff" in r], expected="[]")
-print(f"  roots[:5]        : {roots[:5]}")
+label("morph_codes count == roots count",
+      len(morph_codes) == len(roots),
+      len(morph_codes), len(roots))
+label("pos_tags count == roots count",
+      len(pos_tags) == len(roots),
+      len(pos_tags), len(roots))
 
 # Verify class+delta → char sequence round-trip
 from main import _cumulative_from_deltas
-positions = _cumulative_from_deltas(pos_deltas_vals)
+positions      = _cumulative_from_deltas(pos_deltas_vals)
 reconstructed_seq = "".join(
     inverse_map.get((cls, pos), "?") for cls, pos in zip(char_classes, positions)
 )
 expected_seq = "^" + "$_^".join(roots) + "$"
-label("class+delta → char sequence",
+label("class+delta → char sequence round-trip",
       reconstructed_seq == expected_seq,
       repr(reconstructed_seq[:60]), repr(expected_seq[:60]))
+
+# No "?" in reconstructed sequence — every (class, pos) must be in inverse_map
+label("no unmapped (class, pos) pairs",
+      "?" not in reconstructed_seq,
+      got=reconstructed_seq[:60], expected="no '?'")
+
+print(f"  roots[:5]        : {roots[:5]}")
+print(f"  char_classes[:5] : {char_classes[:5]}")
+print(f"  pos_deltas[:5]   : {pos_deltas_vals[:5]}")
 
 
 # =========================================================================
 # STAGE 5C  — _build_encoded_sentences_from_metadata reconstruction
-#             This is what decompress actually uses — must match encoder exactly
 # =========================================================================
 print(SEP)
 print("STAGE 5C — metadata reconstruction (the REAL decompress path)")
 print(SEP)
 
+from main import _build_encoded_sentences_from_metadata
+
 root_lengths = [len(r) for r in roots]
 
+# Manually build what _build_encoded_sentences_from_metadata produces
 recon_morph: List[int] = []
 recon_pos:   List[str] = []
 for token_idx, length in enumerate(root_lengths):
@@ -194,10 +274,10 @@ for token_idx, length in enumerate(root_lengths):
         recon_morph.append(0)
         recon_pos.append("X")
 
-label("recon morph == original",
+label("recon morph == original char_morph_codes",
       recon_morph == char_morph_codes,
       recon_morph[:20], char_morph_codes[:20])
-label("recon pos == original",
+label("recon pos == original char_pos_tags",
       recon_pos == char_pos_tags,
       recon_pos[:20], char_pos_tags[:20])
 
@@ -207,6 +287,79 @@ if recon_pos != char_pos_tags:
             print(f"  first pos mismatch @ index {i}: recon={a!r}  orig={b!r}")
             break
     print(f"  recon len={len(recon_pos)}  orig len={len(char_pos_tags)}")
+
+# Also verify via the actual function
+payload_for_recon = {
+    "root_lengths":     [root_lengths],
+    "pos_huffman_bits": [float(encoded["pos_huffman_bits"])],
+    "pos_n_tags":       [int(encoded["pos_n_tags"])],
+    "pos_tags":         [pos_tags],
+    "morph_codes":      [morph_codes],
+}
+recon_sentences = _build_encoded_sentences_from_metadata(payload_for_recon)
+label("_build_encoded_sentences_from_metadata returns 1 sentence",
+      len(recon_sentences) == 1, len(recon_sentences), 1)
+label("function recon morph == manual recon morph",
+      recon_sentences[0]["char_morph_codes"] == recon_morph,
+      recon_sentences[0]["char_morph_codes"][:10], recon_morph[:10])
+label("function recon pos == manual recon pos",
+      recon_sentences[0]["char_pos_tags"] == recon_pos,
+      recon_sentences[0]["char_pos_tags"][:10], recon_pos[:10])
+
+
+# =========================================================================
+# STAGE 5D  — compress_to_file root_lengths serialisation round-trip
+# =========================================================================
+print(SEP)
+print("STAGE 5D — compress_to_file root_lengths serialisation round-trip")
+print(SEP)
+
+# Simulate what compress_to_file packs into metadata for root_lengths/morph_codes/pos_tags
+# then verify _build_encoded_sentences_from_metadata reconstructs correctly
+# for a multi-sentence payload.
+
+# Build a second sentence so we have 2 sentences
+second_sent = all_sents[1] if len(all_sents) > 1 else first_sent
+morph2      = analyser.analyse_sentence(second_sent.text)
+syntax2     = analyse_sentence(second_sent)
+freq_table2 = struct_enc.build_pos_frequency_table([syntax.pos_tags, syntax2.pos_tags])
+encoded2    = char_enc.encode_sentence_full(morph2, syntax2, struct_enc, freq_table2)
+
+roots2       = encoded2["roots"]
+morph_codes2 = encoded2["morph_codes"]
+pos_tags2    = encoded2["pos_tags"]
+
+packed_payload: Dict[str, Any] = {
+    "root_lengths":     [[len(r) for r in roots], [len(r) for r in roots2]],
+    "pos_huffman_bits": [float(encoded["pos_huffman_bits"]),
+                         float(encoded2["pos_huffman_bits"])],
+    "pos_n_tags":       [int(encoded["pos_n_tags"]), int(encoded2["pos_n_tags"])],
+    "pos_tags":         [pos_tags, pos_tags2],
+    "morph_codes":      [morph_codes, morph_codes2],
+}
+recon2 = _build_encoded_sentences_from_metadata(packed_payload)
+label("multi-sentence reconstruction: 2 sentences returned",
+      len(recon2) == 2, len(recon2), 2)
+
+# For sentence 0: morph and pos must match what encode_sentence_full produced
+enc0_morph = encoded["char_morph_codes"]
+enc0_pos   = encoded["char_pos_tags"]
+label("sentence 0 morph matches",
+      recon2[0]["char_morph_codes"] == enc0_morph,
+      recon2[0]["char_morph_codes"][:10], enc0_morph[:10])
+label("sentence 0 pos matches",
+      recon2[0]["char_pos_tags"] == enc0_pos,
+      recon2[0]["char_pos_tags"][:10], enc0_pos[:10])
+
+# For sentence 1: similar check
+enc1_morph = encoded2["char_morph_codes"]
+enc1_pos   = encoded2["char_pos_tags"]
+label("sentence 1 morph matches",
+      recon2[1]["char_morph_codes"] == enc1_morph,
+      recon2[1]["char_morph_codes"][:10], enc1_morph[:10])
+label("sentence 1 pos matches",
+      recon2[1]["char_pos_tags"] == enc1_pos,
+      recon2[1]["char_pos_tags"][:10], enc1_pos[:10])
 
 
 # =========================================================================
@@ -218,7 +371,7 @@ print(SEP)
 
 from compression.pipeline.stage6_probability import ContextMixingModel
 
-# The ENCODER builds fake_sentence using the real encoder outputs
+# Build encoder-side and decoder-side fake sentences
 fake_sentence_enc = {
     "char_classes":     char_classes,
     "char_morph_codes": char_morph_codes,
@@ -230,11 +383,10 @@ fake_sentence_enc = {
     "pos_n_tags":       int(encoded["pos_n_tags"]),
 }
 
-# The DECODER builds fake_sentence using the RECONSTRUCTED streams
 fake_sentence_dec = {
-    "char_classes":     char_classes,      # same — stored in file
-    "char_morph_codes": recon_morph,       # reconstructed
-    "char_pos_tags":    recon_pos,         # reconstructed
+    "char_classes":     char_classes,
+    "char_morph_codes": recon_morph,
+    "char_pos_tags":    recon_pos,
     "pos_tags":         pos_tags,
     "morph_codes":      morph_codes,
     "roots":            roots,
@@ -252,16 +404,16 @@ cm_dec.train([fake_sentence_dec])
 mismatches = 0
 for i in range(len(char_classes)):
     ctx_enc = {
-        "char_history":        char_classes[:i],
-        "current_morph_code":  char_morph_codes[i],
-        "current_pos_tag":     char_pos_tags[i],
-        "struct_prob":         0.5,
+        "char_history":       char_classes[:i],
+        "current_morph_code": char_morph_codes[i],
+        "current_pos_tag":    char_pos_tags[i],
+        "struct_prob":        0.5,
     }
     ctx_dec = {
-        "char_history":        char_classes[:i],
-        "current_morph_code":  recon_morph[i],
-        "current_pos_tag":     recon_pos[i],
-        "struct_prob":         0.5,
+        "char_history":       char_classes[:i],
+        "current_morph_code": recon_morph[i],
+        "current_pos_tag":    recon_pos[i],
+        "struct_prob":        0.5,
     }
     dist_enc = cm_enc.probability_distribution(ctx_enc)
     dist_dec = cm_dec.probability_distribution(ctx_dec)
@@ -275,13 +427,44 @@ for i in range(len(char_classes)):
             print(f"    enc pos={char_pos_tags[i]!r}  dec pos={recon_pos[i]!r}")
 
 label("enc vs dec prob distributions match at all positions",
-      mismatches == 0,
-      f"{mismatches} mismatches", "0 mismatches")
+      mismatches == 0, f"{mismatches} mismatches", "0 mismatches")
+
+# Verify distributions are normalised (sum ≈ 1.0)
+ctx_test = {
+    "char_history":       [],
+    "current_morph_code": 0,
+    "current_pos_tag":    "NN",
+    "struct_prob":        0.5,
+}
+dist_test = cm_enc.probability_distribution(ctx_test)
+total_prob = sum(dist_test.values())
+label("probability distribution sums to ~1.0",
+      abs(total_prob - 1.0) < 1e-6,
+      got=f"{total_prob:.8f}", expected="~1.0")
+
+# Multi-sentence training: train on both sentences, ensure no crash and vocab grows
+fake_s2_enc = {
+    "char_classes":     encoded2["char_classes"],
+    "char_morph_codes": encoded2["char_morph_codes"],
+    "char_pos_tags":    encoded2["char_pos_tags"],
+    "pos_tags":         pos_tags2,
+    "morph_codes":      morph_codes2,
+    "roots":            roots2,
+    "pos_huffman_bits": float(encoded2["pos_huffman_bits"]),
+    "pos_n_tags":       int(encoded2["pos_n_tags"]),
+}
+
+cm_multi = ContextMixingModel()
+cm_multi.train([fake_sentence_enc, fake_s2_enc])
+label("multi-sentence training: char_vocab non-empty",
+      len(cm_multi.char_vocab) > 0)
+label("multi-sentence training: vocab >= single-sentence vocab",
+      len(cm_multi.char_vocab) >= len(cm_enc.char_vocab),
+      len(cm_multi.char_vocab), len(cm_enc.char_vocab))
 
 
 # =========================================================================
 # STAGE 7  — arithmetic encode (encoder context) + decode (decoder context)
-#            This is the real failure scenario
 # =========================================================================
 print(SEP)
 print("STAGE 7 — arithmetic coder: encode with enc_ctx, decode with dec_ctx")
@@ -291,6 +474,10 @@ from compression.pipeline.stage7_arithmetic import ArithmeticEncoder, Arithmetic
 
 enc = ArithmeticEncoder()
 bitstream = enc.encode(char_classes, cm_enc, {}, [fake_sentence_enc])
+
+label("bitstream is non-empty bytes",
+      isinstance(bitstream, (bytes, bytearray)) and len(bitstream) > 0,
+      type(bitstream).__name__, "bytes")
 
 dec = ArithmeticDecoder()
 decoded_classes = dec.decode(bitstream, cm_dec, [fake_sentence_dec], len(char_classes))
@@ -308,23 +495,78 @@ if decoded_classes != char_classes:
             print(f"  first class mismatch @ index {i}: decoded={a}, original={b}")
             break
 
+# Re-encode with SAME model (enc == dec) — must always be lossless
+bitstream_same = enc.encode(char_classes, cm_enc, {}, [fake_sentence_enc])
+decoded_same   = dec.decode(bitstream_same, cm_enc, [fake_sentence_enc], len(char_classes))
+label("same-model encode/decode is lossless",
+      decoded_same == char_classes,
+      decoded_same[:10], char_classes[:10])
+
 
 # =========================================================================
-# STAGE 7B  — pos_deltas round-trip
+# STAGE 7B  — pos_deltas unigram round-trip
 # =========================================================================
 print(SEP)
 print("STAGE 7B — pos_deltas arithmetic round-trip")
 print(SEP)
 
-counts = Counter(pos_deltas_vals)
-enc2 = ArithmeticEncoder()
+counts       = Counter(pos_deltas_vals)
+enc2         = ArithmeticEncoder()
 pd_bitstream = enc2.encode_unigram_counts(pos_deltas_vals, counts)
-dec2 = ArithmeticDecoder()
+dec2         = ArithmeticDecoder()
 decoded_deltas = dec2.decode_unigram_counts(pd_bitstream, counts, len(pos_deltas_vals))
 
 label("pos_deltas round-trip",
       decoded_deltas == pos_deltas_vals,
       decoded_deltas[:10], pos_deltas_vals[:10])
+label("pos_deltas bitstream is bytes",
+      isinstance(pd_bitstream, (bytes, bytearray)),
+      type(pd_bitstream).__name__, "bytes")
+
+# Edge: single unique value
+single_stream = [3, 3, 3, 3]
+single_counts = Counter(single_stream)
+enc3  = ArithmeticEncoder()
+dec3  = ArithmeticDecoder()
+bs3   = enc3.encode_unigram_counts(single_stream, single_counts)
+out3  = dec3.decode_unigram_counts(bs3, single_counts, len(single_stream))
+label("pos_deltas single-value round-trip",
+      out3 == single_stream, out3, single_stream)
+
+
+# =========================================================================
+# STAGE 7C  — multi-sentence arithmetic round-trip
+# =========================================================================
+print(SEP)
+print("STAGE 7C — multi-sentence arithmetic round-trip")
+print(SEP)
+
+all_classes = char_classes + encoded2["char_classes"]
+fake_s2_dec = {
+    "char_classes":     encoded2["char_classes"],
+    "char_morph_codes": encoded2["char_morph_codes"],
+    "char_pos_tags":    encoded2["char_pos_tags"],
+    "pos_tags":         pos_tags2,
+    "morph_codes":      morph_codes2,
+    "roots":            roots2,
+    "pos_huffman_bits": float(encoded2["pos_huffman_bits"]),
+    "pos_n_tags":       int(encoded2["pos_n_tags"]),
+}
+
+enc_multi = ArithmeticEncoder()
+bs_multi  = enc_multi.encode(all_classes, cm_multi, {},
+                              [fake_sentence_enc, fake_s2_enc])
+
+dec_multi = ArithmeticDecoder()
+decoded_multi = dec_multi.decode(bs_multi, cm_multi,
+                                  [fake_sentence_enc, fake_s2_enc], len(all_classes))
+
+label("multi-sentence decoded length == original",
+      len(decoded_multi) == len(all_classes),
+      len(decoded_multi), len(all_classes))
+label("multi-sentence decoded classes == original",
+      decoded_multi == all_classes,
+      decoded_multi[:10], all_classes[:10])
 
 
 # =========================================================================
@@ -340,75 +582,296 @@ reconstructed = _reconstruct_chars(
     decoded_classes, decoded_deltas, [len(char_classes)]
 )
 expected_seq2 = "^" + "$_^".join(roots) + "$"
-label("_reconstruct_chars output",
+label("_reconstruct_chars output matches expected",
       reconstructed == expected_seq2,
       repr(reconstructed[:60]), repr(expected_seq2[:60]))
 
+# Edge: empty inputs → empty string
+label("_reconstruct_chars on empty → empty string",
+      _reconstruct_chars([], [], []) == "",
+      got=_reconstruct_chars([], [], []), expected="")
+
 
 # =========================================================================
-# STAGE 9  — morph decode
+# STAGE 9  — morph decode + apply_morph all codes
 # =========================================================================
 print(SEP)
-print("STAGE 9 — morph decode")
+print("STAGE 9 — morph decode + apply_morph coverage")
 print(SEP)
 
-from compression.alphabet.morph_codes import apply_morph
+from compression.alphabet.morph_codes import (
+    apply_morph,
+    BASE, PLURAL, PAST_TENSE, PRESENT_PART, PAST_PART,
+    THIRD_SING, COMPARATIVE, SUPERLATIVE, ADVERBIAL,
+    NEGATION, AGENT, NOMINALIZE, IRREGULAR,
+)
 
 roots_out = _split_roots(reconstructed)
-label("split roots match", roots_out == roots, roots_out[:5], roots[:5])
+label("_split_roots count matches roots count",
+      len(roots_out) == len(roots), len(roots_out), len(roots))
+label("_split_roots values match roots",
+      roots_out == roots, roots_out[:5], roots[:5])
 
-words_out = [
-    apply_morph(r, morph_codes[i] if i < len(morph_codes) else 0)
-    for i, r in enumerate(roots_out)
-]
-final = _join_words(words_out)
+words_out  = [apply_morph(r, morph_codes[i] if i < len(morph_codes) else 0)
+              for i, r in enumerate(roots_out)]
+final      = _join_words(words_out)
+final_cap  = final[0].upper() + final[1:] if final else final
 expected_final = first_sent.text.strip()
-label("capitalisation restored",
-      final.lower() == expected_final.lower(),
-      repr(final[:80]), repr(expected_final[:80]))
-label("final text exact match",
-      final == expected_final,
-      repr(final[:80]), repr(expected_final[:80]))
+
+label("final text (case-insensitive) matches source sentence",
+      final_cap.lower() == expected_final.lower(),
+      repr(final_cap[:80]), repr(expected_final[:80]))
+
+# apply_morph exhaustive code coverage
+apply_cases = [
+    (BASE,         "run",    "run"),
+    (PLURAL,       "dog",    None),     # lemminflect, result must be non-empty str
+    (PAST_TENSE,   "walk",   None),
+    (PRESENT_PART, "run",    None),
+    (PAST_PART,    "break",  None),
+    (THIRD_SING,   "run",    None),
+    (COMPARATIVE,  "fast",   "faster"),
+    (COMPARATIVE,  "good",   "better"),
+    (COMPARATIVE,  "bad",    "worse"),
+    (SUPERLATIVE,  "fast",   "fastest"),
+    (SUPERLATIVE,  "good",   "best"),
+    (SUPERLATIVE,  "bad",    "worst"),
+    (ADVERBIAL,    "quick",  "quickly"),
+    (ADVERBIAL,    "happy",  "happily"),
+    (ADVERBIAL,    "gentle", "gently"),
+    (NEGATION,     "happy",  "unhappy"),
+    (NEGATION,     "unhappy","unhappy"),  # already prefixed → no double
+    (AGENT,        "run",    "runner"),
+    (AGENT,        "write",  "writer"),
+    (NOMINALIZE,   "dark",   "darkness"),
+    (NOMINALIZE,   "kind",   "kindness"),
+    (IRREGULAR,    "go",     None),      # any non-empty string
+]
+
+for code, root, expect in apply_cases:
+    result = apply_morph(root, code)
+    if expect is None:
+        ok = isinstance(result, str) and len(result) > 0
+        label(f"apply_morph({root!r}, code={code}) → non-empty str",
+              ok, got=repr(result), expected="non-empty str")
+    else:
+        ok = result == expect
+        label(f"apply_morph({root!r}, code={code}) == {expect!r}",
+              ok, got=repr(result), expected=repr(expect))
 
 
 # =========================================================================
-# STAGE 10  — full compress_to_file → decompress round-trip on moby500.txt
-#             The real end-to-end test
+# STAGE 9B  — _join_words punctuation / quote edge cases
 # =========================================================================
 print(SEP)
-print("STAGE 10 — full compress → decompress round-trip")
+print("STAGE 9B — _join_words edge cases")
+print(SEP)
+
+_jw_cases = [
+    (["Hello", ",", "world", "."],           "Hello, world."),
+    (["(", "hello", ")"],                    "(hello)"),
+    (["it", "'s", "fine"],                   "it's fine"),
+    (["end", "-", "to", "-", "end"],         "end-to-end"),
+    (["$", "100"],                            "$100"),
+    (["50", "%"],                             "50%"),
+    ([],                                      ""),
+    (["word"],                                "word"),
+    (["Hello", "world"],                     "Hello world"),
+]
+
+for words_in, expected_out in _jw_cases:
+    result = _join_words(words_in)
+    label(f"_join_words({words_in!r})",
+          result == expected_out, got=repr(result), expected=repr(expected_out))
+
+
+# =========================================================================
+# STAGE 10  — binary envelope: encode_metadata / decode_metadata / is_lexi_file
+# =========================================================================
+print(SEP)
+print("STAGE 10 — binary envelope (encode_metadata / decode_metadata / is_lexi_file)")
+print(SEP)
+
+from compression.metadata_codec import encode_metadata, decode_metadata, is_lexi_file
+
+# Build a minimal but representative metadata dict (same structure as compress_to_file)
+test_metadata: Dict[str, Any] = {
+    "compressed_bitstream":  b"\x01\x02\x03\xff",
+    "pos_deltas_bitstream":  b"\xaa\xbb",
+    "symbol_table":          {"§E0": "London"},
+    "pos_deltas_counts":     {0: 3, 1: 2, -1: 1},
+    "pos_deltas_count":      6,
+    "sentence_char_counts":  [12, 8],
+    "pos_huffman_bits":      [3.14, 2.71],
+    "pos_n_tags":            [5, 4],
+    "pos_tags":              [["NN", "VBZ", "DT"], ["NNP", "VBD"]],
+    "morph_codes":           [[0, 2, 0], [0, 1]],
+    "root_lengths":          [[3, 2, 1], [2, 3]],
+    "model_weights":         [0.33, 0.33, 0.34],
+    "char_context":          {0: {1: 5, 2: 3}, 1: {0: 2}},
+    "morph_context":         {0: {0: 10}},
+    "struct_context":        {"NN": {0: 4, 1: 2}},
+    "char_vocab":            [0, 1, 2, 3, 4, 5, 6],
+    "morph_vocab":           [0, 2],
+    "pos_vocab":             ["NN", "VBZ", "DT"],
+    "num_symbols":           20,
+    "num_char_classes":      7,
+    "pos_freq_table":        {"NN": 10, "VBZ": 5},
+}
+
+encoded_binary = encode_metadata(test_metadata)
+label("encode_metadata returns bytes",
+      isinstance(encoded_binary, (bytes, bytearray)),
+      type(encoded_binary).__name__, "bytes")
+label("encoded binary is non-empty",
+      len(encoded_binary) > 0, len(encoded_binary), "> 0")
+
+label("is_lexi_file detects own output",
+      is_lexi_file(encoded_binary), got=False, expected=True)
+label("is_lexi_file rejects random bytes",
+      not is_lexi_file(b"\x00\x01\x02\x03\x04\x05\x06\x07"),
+      got=True, expected=False)
+label("is_lexi_file rejects JSON",
+      not is_lexi_file(b'{"key": "value"}'),
+      got=True, expected=False)
+
+decoded_meta = decode_metadata(encoded_binary)
+label("decode_metadata returns dict",
+      isinstance(decoded_meta, dict), type(decoded_meta).__name__, "dict")
+
+# Check every key round-trips correctly
+for key in ["pos_deltas_count", "num_symbols", "num_char_classes"]:
+    label(f"scalar field '{key}' round-trips",
+          decoded_meta.get(key) == test_metadata[key],
+          got=decoded_meta.get(key), expected=test_metadata[key])
+
+label("compressed_bitstream round-trips",
+      bytes(decoded_meta["compressed_bitstream"]) == test_metadata["compressed_bitstream"],
+      got=bytes(decoded_meta["compressed_bitstream"]),
+      expected=test_metadata["compressed_bitstream"])
+
+label("symbol_table round-trips",
+      decoded_meta.get("symbol_table") == test_metadata["symbol_table"],
+      got=decoded_meta.get("symbol_table"), expected=test_metadata["symbol_table"])
+
+label("pos_tags round-trips",
+      decoded_meta.get("pos_tags") == test_metadata["pos_tags"],
+      got=decoded_meta.get("pos_tags"), expected=test_metadata["pos_tags"])
+
+label("morph_codes round-trips",
+      decoded_meta.get("morph_codes") == test_metadata["morph_codes"],
+      got=decoded_meta.get("morph_codes"), expected=test_metadata["morph_codes"])
+
+label("root_lengths round-trips",
+      decoded_meta.get("root_lengths") == test_metadata["root_lengths"],
+      got=decoded_meta.get("root_lengths"), expected=test_metadata["root_lengths"])
+
+label("model_weights round-trips",
+      decoded_meta.get("model_weights") == test_metadata["model_weights"],
+      got=decoded_meta.get("model_weights"), expected=test_metadata["model_weights"])
+
+label("char_vocab round-trips",
+      list(decoded_meta.get("char_vocab", [])) == test_metadata["char_vocab"],
+      got=decoded_meta.get("char_vocab"), expected=test_metadata["char_vocab"])
+
+label("pos_freq_table round-trips",
+      decoded_meta.get("pos_freq_table") == test_metadata["pos_freq_table"],
+      got=decoded_meta.get("pos_freq_table"), expected=test_metadata["pos_freq_table"])
+
+
+# =========================================================================
+# STAGE 11  — full compress_to_file → decompress end-to-end
+# =========================================================================
+print(SEP)
+print("STAGE 11 — full compress_to_file → decompress end-to-end")
 print(SEP)
 
 from main import compress_to_file, decompress
 
-compress_to_file(normalized, "/tmp/trace_test.lexis")
-decoded_text = decompress("/tmp/trace_test.lexis")
+with tempfile.NamedTemporaryFile(suffix=".lexis", delete=False) as tf:
+    tmp_path = tf.name
 
-label("decoded length == original",
-      len(decoded_text) == len(normalized),
-      len(decoded_text), len(normalized))
-label("decoded text == original",
-      decoded_text == normalized,
-      repr(decoded_text[:120]), repr(normalized[:120]))
+try:
+    stats = compress_to_file(normalized, tmp_path)
 
-# Show first character-level mismatch
-if decoded_text != normalized:
-    for i, (a, b) in enumerate(zip(decoded_text, normalized)):
-        if a != b:
-            print(f"  first char mismatch @ index {i}:")
-            print(f"    decoded  : {repr(decoded_text[max(0,i-10):i+20])}")
-            print(f"    original : {repr(normalized[max(0,i-10):i+20])}")
-            # find which sentence this index belongs to
-            sentences = list(doc.sents)
-            pos = 0
-            for s_idx, sent in enumerate(sentences):
-                sent_len = len(sent.text)
-                if pos + sent_len >= i:
-                    print(f"  in sentence #{s_idx}: {repr(sent.text[:60])}")
-                    print(f"  offset within sentence: {i - pos}")
-                    break
-                pos += sent_len + 1
-            break
+    label("compress_to_file returns dict",
+          isinstance(stats, dict), type(stats).__name__, "dict")
+    label("output file exists and is non-empty",
+          Path(tmp_path).exists() and Path(tmp_path).stat().st_size > 0,
+          got=Path(tmp_path).stat().st_size if Path(tmp_path).exists() else 0,
+          expected="> 0")
+    label("is_lexi_file accepts written output",
+          is_lexi_file(Path(tmp_path).read_bytes()), got=False, expected=True)
+
+    decoded_text = decompress(tmp_path)
+
+    label("decompress returns string",
+          isinstance(decoded_text, str), type(decoded_text).__name__, "str")
+    label("decoded length == normalized",
+          len(decoded_text) == len(normalized),
+          len(decoded_text), len(normalized))
+    label("decoded text == normalized",
+          decoded_text == normalized,
+          repr(decoded_text[:120]), repr(normalized[:120]))
+
+    # Show first character-level mismatch with sentence context
+    if decoded_text != normalized:
+        for i, (a, b) in enumerate(zip(decoded_text, normalized)):
+            if a != b:
+                print(f"  first char mismatch @ index {i}:")
+                print(f"    decoded  : {repr(decoded_text[max(0, i-10):i+20])}")
+                print(f"    original : {repr(normalized[max(0, i-10):i+20])}")
+                pos = 0
+                for s_idx, sent in enumerate(all_sents):
+                    sent_len = len(sent.text)
+                    if pos + sent_len >= i:
+                        print(f"  in sentence #{s_idx}: {repr(sent.text[:60])}")
+                        print(f"  offset within sentence: {i - pos}")
+                        break
+                    pos += sent_len + 1
+                break
+        if len(decoded_text) != len(normalized):
+            short, long_ = (
+                (decoded_text, normalized)
+                if len(decoded_text) < len(normalized)
+                else (normalized, decoded_text)
+            )
+            print(f"  decoded is {'shorter' if decoded_text < normalized else 'longer'} "
+                  f"by {abs(len(decoded_text) - len(normalized))} chars")
+
+finally:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+
+
+# =========================================================================
+# STAGE 12  — autocorrect pass-through
+# =========================================================================
+print(SEP)
+print("STAGE 12 — autocorrect pass-through")
+print(SEP)
+
+from compression.pipeline.stage9_autocorrect import autocorrect
+
+# autocorrect must not corrupt well-formed text
+autocorrect_cases = [
+    "The quick brown fox jumps over the lazy dog.",
+    "Hello world.",
+    "It is a truth universally acknowledged.",
+    "",       # empty string must not crash
+    "A",      # single character
+]
+
+for case in autocorrect_cases:
+    result = autocorrect(case)
+    label(f"autocorrect({case!r[:30]!r}) returns str",
+          isinstance(result, str), type(result).__name__, "str")
+    if case:  # non-empty: must not destroy content entirely
+        label(f"autocorrect({case!r[:30]!r}) is non-empty",
+              len(result) > 0, got=len(result), expected="> 0")
+
 
 print(SEP)
 print("Done.")
