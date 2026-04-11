@@ -28,10 +28,10 @@ from compression.pipeline.stage3_syntax import SyntaxResult
 # 3  mixed          e.g. "eBook", "iPhone"  (char-level bitmap packed below)
 #
 # For flag 3 a secondary bitmap is stored: one bit per character of the
-# *root* (not the surface form), starting from index 1 (char 0 is always
-# lowercase in mixed mode).  bit 0 of bitmap = char index 1, bit 1 = char
-# index 2, etc.  The bitmap is packed into an integer and stored alongside
-# case_flags in the LEXI metadata.
+# surface form.  bit N of bitmap corresponds to char index N of the surface.
+# If bit N is set, char N is uppercase; if clear, char N is lowercase.
+# The bitmap is packed into an integer and stored alongside case_flags in
+# the LEXI metadata.
 
 CASE_LOWER = 0
 CASE_TITLE = 1
@@ -43,6 +43,7 @@ def compute_case_flag(surface: str) -> Tuple[int, int]:
     """Return (flag, bitmap) for a single token surface form.
 
     bitmap is only meaningful when flag == CASE_MIXED; otherwise 0.
+    bit N of bitmap corresponds to char index N of the surface form.
     """
     if not surface:
         return CASE_LOWER, 0
@@ -52,11 +53,9 @@ def compute_case_flag(surface: str) -> Tuple[int, int]:
         return CASE_UPPER, 0
     if surface[0].isupper() and surface[1:].islower():
         return CASE_TITLE, 0
-    # mixed — pack a per-char bitmap starting from index 1
-    # bit 0 of bitmap = char at index 1, bit 1 = char at index 2, etc.
-    # char at index 0 is always lowercase in CASE_MIXED.
+    # mixed — pack a per-char bitmap: bit N = char index N
     bitmap = 0
-    for i, ch in enumerate(surface[1:], start=0):
+    for i, ch in enumerate(surface):
         if ch.isupper():
             bitmap |= (1 << i)
     return CASE_MIXED, bitmap
@@ -72,11 +71,11 @@ def apply_case_flag(word: str, flag: int, bitmap: int = 0) -> str:
         return word[0].upper() + word[1:]
     if flag == CASE_UPPER:
         return word.upper()
-    # CASE_MIXED — char 0 is always lowercase; bitmap bit 0 = char index 1
+    # CASE_MIXED — bit N of bitmap corresponds to char index N
     chars = list(word.lower())
-    for bit_pos, char_idx in enumerate(range(1, len(chars))):
-        if bitmap & (1 << bit_pos):
-            chars[char_idx] = chars[char_idx].upper()
+    for i in range(len(chars)):
+        if bitmap & (1 << i):
+            chars[i] = chars[i].upper()
     return "".join(chars)
 
 
