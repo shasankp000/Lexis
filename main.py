@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, cast
 
-import msgpack
+from compression.metadata_codec import decode_metadata, encode_metadata, is_lexi_file
 
 try:
     from tqdm import tqdm  # type: ignore
@@ -181,7 +181,6 @@ def _reconstruct_chars(
             char = inverse_map.get((cls, pos))
             if char is not None:
                 chars.append(char)
-            # Unknown coord: skip silently (no fallback '_' insertion).
         idx += count
 
     if idx < len(class_stream):
@@ -217,17 +216,8 @@ def _flatten(nested: List[List[Any]]) -> List[Any]:
     return [item for sub in nested for item in sub]
 
 
-# Chars that always attach to the token on their left (closing punctuation).
-# '"' is handled separately in _join_words because it is context-dependent:
-# after a sentence boundary it is an opening quote (attaches right),
-# after a word it is a closing quote (attaches left).
-_ATTACH_LEFT = set(".,;:!?)'-—%-/")
-# Chars whose right edge glues to the following token with no space.
+_ATTACH_LEFT  = set(".,;:!?)'-—%-/")
 _ATTACH_RIGHT = set("($#/")
-# Previous-token endings that signal the next '"' is an opening quote.
-# NOTE: '.' intentionally excluded — '"' after '.' is a closing quote
-# (e.g. `true."`).  Opening quotes after sentence-end are preceded by
-# whitespace, which is still in this set via the space character.
 _OPEN_QUOTE_AFTER = set("!?(— ")
 
 
@@ -253,15 +243,11 @@ def _join_words(words: list[str]) -> str:
             parts[-1] += word
             continue
         first_char = word[0]
-        # '"' is ambiguous: opening quote attaches to the right (no space
-        # before the next word), closing quote attaches to the left.
         if first_char == '"':
             prev_last = parts[-1][-1] if parts[-1] else ""
             if prev_last in _OPEN_QUOTE_AFTER or not parts[-1]:
-                # opening quote: space before '"', then '"' glues to next word
                 parts.append(' "')
             else:
-                # closing quote: glue to previous word
                 parts[-1] += '"'
             continue
         if first_char == "'":
@@ -280,8 +266,8 @@ def _join_words(words: list[str]) -> str:
 
 def _build_context_model(payload: Dict[str, Any]) -> ContextMixingModel:
     model = ContextMixingModel()
-    char_context = defaultdict(Counter)
-    morph_context = defaultdict(Counter)
+    char_context   = defaultdict(Counter)
+    morph_context  = defaultdict(Counter)
     struct_context = defaultdict(Counter)
 
     for key, counter in payload.get("char_context", {}).items():
@@ -297,35 +283,33 @@ def _build_context_model(payload: Dict[str, Any]) -> ContextMixingModel:
             {int(k): int(v) for k, v in dict(counter).items()}
         )
 
-    model.char_context = char_context
-    model.morph_context = morph_context
+    model.char_context   = char_context
+    model.morph_context  = morph_context
     model.struct_context = struct_context
-    model.weights = list(payload.get("model_weights", model.weights))
-    model.char_vocab = [int(v) for v in payload.get("char_vocab", model.char_vocab)]
+    model.weights   = list(payload.get("model_weights", model.weights))
+    model.char_vocab  = [int(v) for v in payload.get("char_vocab",  model.char_vocab)]
     model.morph_vocab = [int(v) for v in payload.get("morph_vocab", model.morph_vocab)]
-    model.pos_vocab = [str(v) for v in payload.get("pos_vocab", model.pos_vocab)]
+    model.pos_vocab   = [str(v) for v in payload.get("pos_vocab",   model.pos_vocab)]
     return model
 
 
 def _build_encoded_sentences_from_metadata(payload: Dict[str, Any]) -> List[Dict]:
     root_lengths = payload.get("root_lengths", [])
-    pos_bits = payload.get("pos_huffman_bits", [])
-    pos_n_tags = payload.get("pos_n_tags", [])
-    pos_tags = payload.get("pos_tags", [])
-    morph_codes = payload.get("morph_codes", [])
+    pos_bits     = payload.get("pos_huffman_bits", [])
+    pos_n_tags   = payload.get("pos_n_tags", [])
+    pos_tags     = payload.get("pos_tags", [])
+    morph_codes  = payload.get("morph_codes", [])
 
     encoded: List[Dict] = []
     for idx, lengths in enumerate(root_lengths):
-        sentence_pos = pos_tags[idx] if idx < len(pos_tags) else []
+        sentence_pos   = pos_tags[idx]    if idx < len(pos_tags)    else []
         sentence_morph = morph_codes[idx] if idx < len(morph_codes) else []
-        char_pos_tags: List[str] = []
+        char_pos_tags:    List[str] = []
         char_morph_codes: List[int] = []
 
         for token_idx, length in enumerate(lengths):
-            pos_tag = sentence_pos[token_idx] if token_idx < len(sentence_pos) else "X"
-            morph_code = (
-                sentence_morph[token_idx] if token_idx < len(sentence_morph) else 0
-            )
+            pos_tag    = sentence_pos[token_idx]   if token_idx < len(sentence_pos)   else "X"
+            morph_code = sentence_morph[token_idx] if token_idx < len(sentence_morph) else 0
             char_pos_tags.append("X")
             char_morph_codes.append(0)
             char_pos_tags.extend([pos_tag] * length)
@@ -339,12 +323,10 @@ def _build_encoded_sentences_from_metadata(payload: Dict[str, Any]) -> List[Dict
         encoded.append(
             {
                 "char_morph_codes": char_morph_codes,
-                "char_pos_tags": char_pos_tags,
-                "pos_huffman_bits": float(pos_bits[idx])
-                if idx < len(pos_bits)
-                else 0.0,
-                "pos_n_tags": int(pos_n_tags[idx]) if idx < len(pos_n_tags) else 0,
-                "pos_tags": sentence_pos,
+                "char_pos_tags":    char_pos_tags,
+                "pos_huffman_bits": float(pos_bits[idx]) if idx < len(pos_bits) else 0.0,
+                "pos_n_tags":       int(pos_n_tags[idx]) if idx < len(pos_n_tags) else 0,
+                "pos_tags":         sentence_pos,
             }
         )
     return encoded
@@ -354,26 +336,20 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
     """Run full available pipeline on text. Return stats."""
     normalized = normalize_text(text)
 
-    # Stage 4+5: discourse symbol encoding
     print("[Stage 4+5] Running discourse analysis and symbol encoding...")
     discourse_compressed, symbol_table = _run_discourse(normalized)
     print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
 
-    # Character / morphology layers must operate on clean text only.
-    # §E{n} symbols are not in the phonetic alphabet and would corrupt the
-    # character stream if fed to _encode_for_model.
-    analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
+    analyser   = MorphologicalAnalyser(use_spacy=True, model_name=model)
     morphology = analyser.analyse_sentence(normalized)
 
     encoder = CharacterEncoder()
-    stats = encoder.stats(normalized)
+    stats   = encoder.stats(normalized)
 
     encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
-    bpb_value = context_model.bpb(
-        normalized, _EncodedPipeline(encoded_sentences)
-    )
+    bpb_value = context_model.bpb(normalized, _EncodedPipeline(encoded_sentences))
 
     payload = {
         "symbol_table": symbol_table,
@@ -405,42 +381,38 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
     """
     Full compression pipeline with arithmetic coding.
 
-    Stage 4+5 (discourse symbol encoding) runs on the normalised text to
-    produce a symbol_table. The character/morphology pipeline then encodes
-    the *original normalised text* (not the §-symbol version), because §E{n}
-    tokens are outside the phonetic alphabet and would corrupt the character
-    stream. The symbol_table is stored in the msgpack payload and is applied
-    as the very last step in decompress() after join/case-restore.
+    Writes a LEXI-envelope binary file (Option-B, field-id + length-prefix).
+    Stage 4+5 discourse symbol encoding runs on the normalised text to produce
+    a symbol_table.  The character/morphology pipeline encodes the *original
+    normalised text* (not the §-symbol version) because §E{n} tokens are
+    outside the phonetic alphabet.  The symbol_table is stored in the payload
+    and applied as the very last step in decompress().
     """
     normalized = normalize_text(text)
 
-    # Stage 4+5: discourse symbol encoding (for token-count stats + symbol table)
     print("[Stage 4+5] Running discourse analysis and symbol encoding...")
     discourse_compressed, symbol_table = _run_discourse(normalized)
     print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
     orig_len = len(normalized)
     disc_len = len(discourse_compressed)
     print(
-        f"[Stage 4+5] Text length: {orig_len} \u2192 {disc_len} "
+        f"[Stage 4+5] Text length: {orig_len} → {disc_len} "
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    # Character / morphology / probability layers operate on clean English only.
-    # Feeding discourse_compressed here would pass §-symbols into spaCy and the
-    # phonetic encoder, producing garbage roots (§ has no phonetic class entry).
     encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
 
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
 
-    char_classes: List[int] = []
-    char_pos_deltas: List[int] = []
-    sentence_char_counts: List[int] = []
-    pos_huffman_bits: List[float] = []
-    pos_n_tags: List[int] = []
-    pos_tags: List[List[str]] = []
-    morph_codes: List[List[int]] = []
-    root_lengths: List[List[int]] = []
+    char_classes:          List[int]        = []
+    char_pos_deltas:       List[int]        = []
+    sentence_char_counts:  List[int]        = []
+    pos_huffman_bits:      List[float]      = []
+    pos_n_tags:            List[int]        = []
+    pos_tags:              List[List[str]]  = []
+    morph_codes:           List[List[int]]  = []
+    root_lengths:          List[List[int]]  = []
 
     for sentence in encoded_sentences:
         char_classes.extend(sentence.get("char_classes", []))
@@ -452,83 +424,84 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
         morph_codes.append(sentence.get("morph_codes", []))
         root_lengths.append([len(root) for root in sentence.get("roots", [])])
 
-    encoder = ArithmeticEncoder()
-    compressed_bytes = encoder.encode(
+    arith_enc = ArithmeticEncoder()
+    compressed_bytes = arith_enc.encode(
         char_classes, context_model, {}, encoded_sentences
     )
 
-    pos_delta_counts = Counter(char_pos_deltas)
-    pos_deltas_stream = encoder.encode_unigram_counts(char_pos_deltas, pos_delta_counts)
+    pos_delta_counts  = Counter(char_pos_deltas)
+    pos_deltas_stream = arith_enc.encode_unigram_counts(char_pos_deltas, pos_delta_counts)
 
     metadata = {
-        # Stage 4+5 symbol table — required for decode
-        "symbol_table": symbol_table,
-        "compressed_bitstream": compressed_bytes,
-        "pos_deltas_bitstream": pos_deltas_stream,
-        "pos_deltas_counts": {int(k): int(v) for k, v in pos_delta_counts.items()},
-        "pos_deltas_count": len(char_pos_deltas),
+        # bitstreams (raw bytes — not mode-encoded)
+        "compressed_bitstream":  compressed_bytes,
+        "pos_deltas_bitstream":  pos_deltas_stream,
+        # Stage 4+5
+        "symbol_table":          symbol_table,
+        # deltas
+        "pos_deltas_counts":     {int(k): int(v) for k, v in pos_delta_counts.items()},
+        "pos_deltas_count":      len(char_pos_deltas),
+        # per-sentence arrays
         "sentence_char_counts": sentence_char_counts,
-        "pos_huffman_bits": pos_huffman_bits,
-        "pos_n_tags": pos_n_tags,
-        "pos_tags": pos_tags,
-        "morph_codes": morph_codes,
-        "root_lengths": root_lengths,
-        "model_weights": context_model.weights,
-        "char_context": {
-            int(k): dict(v) for k, v in context_model.char_context.items()
-        },
-        "morph_context": {
-            int(k): dict(v) for k, v in context_model.morph_context.items()
-        },
-        "struct_context": {
-            str(k): dict(v) for k, v in context_model.struct_context.items()
-        },
-        "char_vocab": context_model.char_vocab,
-        "morph_vocab": context_model.morph_vocab,
-        "pos_vocab": context_model.pos_vocab,
-        "num_symbols": len(char_classes),
+        "pos_huffman_bits":      pos_huffman_bits,
+        "pos_n_tags":            pos_n_tags,
+        "pos_tags":              pos_tags,
+        "morph_codes":           morph_codes,
+        "root_lengths":          root_lengths,
+        # context model
+        "model_weights":  context_model.weights,
+        "char_context":   {int(k): dict(v) for k, v in context_model.char_context.items()},
+        "morph_context":  {int(k): dict(v) for k, v in context_model.morph_context.items()},
+        "struct_context": {str(k): dict(v) for k, v in context_model.struct_context.items()},
+        "char_vocab":     context_model.char_vocab,
+        "morph_vocab":    context_model.morph_vocab,
+        "pos_vocab":      context_model.pos_vocab,
+        # misc scalars
+        "num_symbols":      len(char_classes),
         "num_char_classes": 7,
-        "huffman_codes": encoded_sentences[0].get("pos_huffman_codes", {})
-        if encoded_sentences
-        else {},
-        "pos_freq_table": pos_freq_table,
+        "pos_freq_table":   pos_freq_table,
     }
 
-    packed = msgpack.packb(metadata, use_bin_type=True)
-    packed_bytes = cast(bytes, packed)
-    Path(output_path).write_bytes(packed_bytes)
+    # --- encode with the new LEXI binary envelope (replaces msgpack) ---
+    binary = encode_metadata(metadata)
+    Path(output_path).write_bytes(binary)
 
-    original_size = len(text.encode("utf-8"))
+    original_size   = len(text.encode("utf-8"))
     compressed_size = len(compressed_bytes)
     return {
-        "original_size": original_size,
-        "compressed_size": compressed_size,
-        "compression_ratio": compressed_size / original_size if original_size else 0.0,
-        "bpb": (compressed_size * 8) / original_size if original_size else 0.0,
-        "discourse_symbols": len(symbol_table),
+        "original_size":          original_size,
+        "compressed_size":        compressed_size,
+        "compression_ratio":      compressed_size / original_size if original_size else 0.0,
+        "bpb":                    (compressed_size * 8) / original_size if original_size else 0.0,
+        "discourse_symbols":      len(symbol_table),
         "discourse_reduction_pct": round(100 * (orig_len - disc_len) / orig_len, 2)
-        if orig_len
-        else 0.0,
+                                   if orig_len else 0.0,
     }
 
 
 def decompress(input_path: str) -> str:
-    """Decompress arithmetic-coded or JSON payloads."""
+    """Decompress a .lexis file.  Auto-detects LEXI envelope, msgpack, or JSON."""
     raw = Path(input_path).read_bytes()
     payload: Dict[str, Any]
-    try:
-        payload = msgpack.unpackb(raw, raw=False, strict_map_key=False)
-    except Exception:
-        payload = json.loads(raw.decode("utf-8"))
 
-    # Retrieve symbol table for Stage 4+5 decode (may be absent in old payloads)
+    if is_lexi_file(raw):
+        # --- new LEXI binary envelope ---
+        payload = decode_metadata(raw)
+    else:
+        # --- legacy msgpack / JSON fallback (read-only, never written) ---
+        try:
+            import msgpack  # type: ignore
+            payload = msgpack.unpackb(raw, raw=False, strict_map_key=False)
+        except Exception:
+            payload = json.loads(raw.decode("utf-8"))
+
     symbol_table: dict = payload.get("symbol_table", {})
 
     if isinstance(payload, dict) and "compressed_bitstream" in payload:
-        context_model = _build_context_model(payload)
+        context_model     = _build_context_model(payload)
         encoded_sentences = _build_encoded_sentences_from_metadata(payload)
 
-        decoder = ArithmeticDecoder()
+        decoder     = ArithmeticDecoder()
         num_symbols = int(
             payload.get("num_symbols", len(payload.get("char_morph_codes", [])))
         )
@@ -539,16 +512,17 @@ def decompress(input_path: str) -> str:
             num_symbols,
         )
 
-        pos_deltas_stream = payload.get("pos_deltas_bitstream", b"")
-        pos_deltas_counts = payload.get("pos_deltas_counts", {})
-        pos_deltas_count = int(payload.get("pos_deltas_count", 0))
+        pos_deltas_stream  = payload.get("pos_deltas_bitstream", b"")
+        pos_deltas_counts  = payload.get("pos_deltas_counts", {})
+        pos_deltas_count   = int(payload.get("pos_deltas_count", 0))
         counts = {int(k): int(v) for k, v in pos_deltas_counts.items()}
         pos_deltas = ArithmeticDecoder().decode_unigram_counts(
             bytes(pos_deltas_stream), counts, pos_deltas_count
         )
+
         sentence_counts = [int(c) for c in payload.get("sentence_char_counts", [])]
-        char_stream = _reconstruct_chars(char_classes, pos_deltas, sentence_counts)
-        roots = _split_roots(char_stream)
+        char_stream     = _reconstruct_chars(char_classes, pos_deltas, sentence_counts)
+        roots           = _split_roots(char_stream)
 
         morph_codes_flat = _flatten(payload.get("morph_codes", []))
         words = [
@@ -558,11 +532,9 @@ def decompress(input_path: str) -> str:
         result = _join_words(words)
         result = result[0].upper() + result[1:] if result else result
 
-        # Stage 4+5 decode: restore §E{n} symbols back to original surfaces.
         if symbol_table:
             result = decode_symbols(result, symbol_table)
 
-        # Stage 9: rule-based autocorrect — fixes spacing/punctuation artifacts.
         return autocorrect(result)
 
     if isinstance(payload, dict) and "morphology" in payload:
@@ -583,29 +555,26 @@ def analyse(text: str, model: str | None = None) -> None:
     """Run pipeline in analysis mode — print stats at each stage."""
     normalized = normalize_text(text)
 
-    # Stage 4+5
     print("[Stage 4+5] Running discourse analysis...")
     discourse_compressed, symbol_table = _run_discourse(normalized)
     orig_tokens = len(normalized.split())
     comp_tokens = len(discourse_compressed.split())
     print(f"[Stage 4+5] Symbols: {len(symbol_table)}")
     print(
-        f"[Stage 4+5] Token reduction: {orig_tokens} \u2192 {comp_tokens} "
+        f"[Stage 4+5] Token reduction: {orig_tokens} → {comp_tokens} "
         f"({100*(orig_tokens-comp_tokens)/orig_tokens:.2f}%)"
     )
 
-    analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
+    analyser   = MorphologicalAnalyser(use_spacy=True, model_name=model)
     morph_stats = analyser.char_savings(normalized)
 
-    encoder = CharacterEncoder()
+    encoder      = CharacterEncoder()
     encode_stats = encoder.stats(normalized)
 
     encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
-    bpb_value = context_model.bpb(
-        normalized, _EncodedPipeline(encoded_sentences)
-    )
+    bpb_value = context_model.bpb(normalized, _EncodedPipeline(encoded_sentences))
 
     print(f"Model: {model or SPACY_MODEL}")
     print(f"Context-mixing bpb: {bpb_value:.4f}")
@@ -621,7 +590,7 @@ def analyse(text: str, model: str | None = None) -> None:
     pos_huffman_results = [
         {
             "pos_huffman_bits": sentence.get("pos_huffman_bits", 0),
-            "tag_count": sentence.get("pos_encoding", {}).get("tag_count", 0),
+            "tag_count":        sentence.get("pos_encoding", {}).get("tag_count", 0),
             "pos_huffman_codes": sentence.get("pos_huffman_codes", {}),
         }
         for sentence in encoded_sentences
@@ -651,25 +620,23 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     compress_parser = subparsers.add_parser("compress", help="Compress input text")
-    compress_parser.add_argument("input", help="Input text file")
+    compress_parser.add_argument("input",  help="Input text file")
     compress_parser.add_argument("output", help="Output binary file")
-    compress_parser.add_argument(
-        "--model", default=None, help="spaCy model to use."
-    )
+    compress_parser.add_argument("--model", default=None, help="spaCy model to use.")
 
     decompress_parser = subparsers.add_parser("decompress", help="Decompress archive")
     decompress_parser.add_argument("input", help="Input binary file")
 
     analyse_parser = subparsers.add_parser("analyse", help="Analyse input text")
-    analyse_parser.add_argument("input", help="Input text file")
+    analyse_parser.add_argument("input",  help="Input text file")
     analyse_parser.add_argument("--model", default=None)
 
     args = parser.parse_args()
 
     if args.command == "compress":
         text = _read_text(args.input)
-        compress(text, args.output, model=args.model)
-        print(f"Wrote compressed payload to {args.output}")
+        compress_to_file(text, args.output, model=args.model)
+        print(f"Wrote LEXI archive to {args.output}")
     elif args.command == "decompress":
         reconstructed = decompress(args.input)
         print(reconstructed)
