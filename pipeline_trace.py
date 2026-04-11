@@ -24,7 +24,7 @@ exercised here, including:
   Stage 10  metadata_codec — every mode independently:
               raw, scalar, flat_uint, flat_int, flat_dict,
               pos, int_nested, sparse_dict, sparse_dict_pos,
-              model_weights, pos_freq
+              model_weights, pos_freq, float_nested, symbol_table
             + encode_metadata / decode_metadata / is_lexi_file
             + case_flags and case_bitmaps fields round-trip
   Stage 11  full compress_to_file → decompress end-to-end, sentence-level diff,
@@ -831,13 +831,19 @@ print(SEP)
 from compression.metadata_codec import (
     encode_metadata, decode_metadata, is_lexi_file,
     # low-level per-mode helpers
-    _enc_raw,       _dec_raw,
-    _enc_scalar,    _dec_scalar,
-    _enc_flat_uint, _dec_flat_uint,
-    _enc_flat_int,  _dec_flat_int,
-    _enc_flat_dict, _dec_flat_dict,
-    _enc_pos,       _dec_pos,
-    _enc_int_nested,_dec_int_nested,
+    _enc_raw,            _dec_raw,
+    _enc_scalar,         _dec_scalar,
+    _enc_flat_uint,      _dec_flat_uint,
+    _enc_flat_int,       _dec_flat_int,
+    _enc_flat_dict,      _dec_flat_dict,
+    _enc_pos,            _dec_pos,
+    _enc_int_nested,     _dec_int_nested,
+    _enc_sparse_dict,    _dec_sparse_dict,
+    _enc_sparse_dict_pos,_dec_sparse_dict_pos,
+    _enc_model_weights,  _dec_model_weights,
+    _enc_pos_freq,       _dec_pos_freq,
+    _enc_float_nested,   _dec_float_nested,
+    _enc_symbol_table,   _dec_symbol_table,
 )
 
 # --- raw ---------------------------------------------------------------
@@ -894,6 +900,110 @@ for sentences in int_nested_cases:
     rt = _dec_int_nested(_enc_int_nested(sentences))
     label(f"int_nested round-trip {[len(s) for s in sentences]}",
           rt == sentences, got=rt, expected=sentences)
+
+# --- sparse_dict (dict[int, dict[int, int]]) --------------------------
+print("  -- sparse_dict --")
+_sd_cases = [
+    {},
+    {0: {0: 1}},
+    {0: {1: 5, 2: 3}, 1: {0: 2}},
+    {-1: {0: 10, -1: 3}, 0: {0: 4}},
+    {k: {k + j: j + 1 for j in range(3)} for k in range(5)},
+]
+for d in _sd_cases:
+    rt = _dec_sparse_dict(_enc_sparse_dict(d))
+    label(f"sparse_dict round-trip keys={sorted(d.keys())}",
+          rt == d, got=rt, expected=d)
+
+# --- sparse_dict_pos (dict[str, dict[int, int]]) ----------------------
+print("  -- sparse_dict_pos --")
+_sdp_cases = [
+    {},
+    {"NOUN": {0: 1}},
+    {"NOUN": {1: 5, 2: 3}, "VERB": {0: 2}},
+    {"ADJ": {0: 10}, "DET": {1: 4, 2: 2}, "PUNCT": {0: 1}},
+]
+for d in _sdp_cases:
+    rt = _dec_sparse_dict_pos(_enc_sparse_dict_pos(d))
+    label(f"sparse_dict_pos round-trip keys={sorted(d.keys())}",
+          rt == d, got=rt, expected=d)
+
+# --- model_weights (list[float], 3 elements, float64) -----------------
+print("  -- model_weights --")
+_mw_cases = [
+    [1/3, 1/3, 1/3],
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.5, 0.3, 0.2],
+    [0.9999999, 0.0000001, 0.0],
+]
+for weights in _mw_cases:
+    rt = _dec_model_weights(_enc_model_weights(weights))
+    # float64 should be bit-exact
+    label(f"model_weights round-trip {[round(w, 6) for w in weights]}",
+          rt == weights, got=rt, expected=weights)
+
+# Verify no float32 precision loss (the historical bug)
+precise_weights = [0.33333333333333331, 0.33333333333333331, 0.33333333333333337]
+rt_precise = _dec_model_weights(_enc_model_weights(precise_weights))
+label("model_weights preserves float64 precision (no float32 rounding)",
+      rt_precise == precise_weights,
+      got=rt_precise, expected=precise_weights)
+
+# --- pos_freq (dict[str, int]) ----------------------------------------
+print("  -- pos_freq --")
+_pf_cases = [
+    {},
+    {"NOUN": 10},
+    {"NOUN": 10, "VERB": 5},
+    {"NOUN": 100, "VERB": 50, "DET": 30, "ADJ": 20, "PUNCT": 15},
+    {tag: i + 1 for i, tag in enumerate(["ADJ", "ADP", "ADV", "AUX", "NOUN", "VERB"])},
+]
+for d in _pf_cases:
+    rt = _dec_pos_freq(_enc_pos_freq(d))
+    label(f"pos_freq round-trip keys={sorted(d.keys())}",
+          rt == d, got=rt, expected=d)
+
+# Edge: unknown tags must be silently dropped (not in UPOS_TAGS)
+_pf_unknown = {"NOUN": 5, "FAKE_TAG": 99, "VERB": 3}
+rt_unknown = _dec_pos_freq(_enc_pos_freq(_pf_unknown))
+label("pos_freq silently drops unknown tags",
+      "FAKE_TAG" not in rt_unknown and rt_unknown.get("NOUN") == 5,
+      got=rt_unknown, expected={"NOUN": 5, "VERB": 3})
+
+# --- float_nested (nested list[list[float]]) --------------------------
+print("  -- float_nested --")
+_fn_cases = [
+    [],
+    [[]],
+    [[3.14]],
+    [[1.0, 2.0, 3.0]],
+    [[1.5, 2.5], [3.5, 4.5]],
+]
+for sentences in _fn_cases:
+    rt = _dec_float_nested(_enc_float_nested(sentences))
+    # float32 XOR-delta — tolerate tiny precision differences
+    ok = len(rt) == len(sentences) and all(
+        len(rt[i]) == len(sentences[i]) and
+        all(abs(rt[i][j] - sentences[i][j]) < 1e-5
+            for j in range(len(sentences[i])))
+        for i in range(len(sentences))
+    )
+    label(f"float_nested round-trip {[len(s) for s in sentences]}",
+          ok, got=rt, expected=sentences)
+
+# --- symbol_table (dict[str, str]) ------------------------------------
+print("  -- symbol_table --")
+_st_cases = [
+    {},
+    {"§E0": "London"},
+    {"§E0": "Ishmael", "§E1": "Ahab", "§R0": "hunts"},
+    {"§E0": "Ünïcödé", "§R1": "São Paulo"},
+]
+for d in _st_cases:
+    rt = _dec_symbol_table(_enc_symbol_table(d))
+    label(f"symbol_table round-trip len={len(d)}",
+          rt == d, got=rt, expected=d)
 
 # --- case_flags / case_bitmaps via int_nested directly ----------------
 print("  -- case_flags / case_bitmaps int_nested round-trips --")
