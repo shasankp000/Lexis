@@ -972,8 +972,10 @@ try:
         for i, (a, b) in enumerate(zip(decoded_text, normalized)):
             if a != b:
                 print(f"  first char mismatch @ index {i}:")
-                print(f"    decoded  : {repr(decoded_text[max(0, i-10):i+20])}")
-                print(f"    original : {repr(normalized[max(0, i-10):i+20])}")
+                decoded_snippet  = repr(decoded_text[max(0, i-10):i+20])
+                original_snippet = repr(normalized[max(0, i-10):i+20])
+                print(f"    decoded  : {decoded_snippet}")
+                print(f"    original : {original_snippet}")
                 pos = 0
                 for s_idx, sent in enumerate(all_sents):
                     sent_len = len(sent.text)
