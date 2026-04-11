@@ -567,11 +567,14 @@ def _dec_symbol_table(blob: bytes) -> Dict[str, str]:
     return out
 
 # ---- mode: model_weights (list[float], exactly 3 elements) --------------
-# Stored as three IEEE-754 single-precision (float32) values + CRC.
+# Stored as three IEEE-754 double-precision (float64) values + CRC.
+# NOTE: float32 was previously used here but caused ~1e-8 rounding errors
+# in the ContextMixingModel weights, which corrupted arithmetic coder
+# output at decode time (encoder and decoder diverged from position 1).
 
 def _enc_model_weights(weights: List[float]) -> bytes:
     w = (list(weights) + [0.0, 0.0, 0.0])[:3]
-    blob = struct.pack("<fff", w[0], w[1], w[2])
+    blob = struct.pack("<ddd", w[0], w[1], w[2])
     crc  = zlib.crc32(blob) & 0xFFFFFFFF
     return blob + struct.pack("<I", crc)
 
@@ -580,7 +583,7 @@ def _dec_model_weights(blob: bytes) -> List[float]:
     computed = zlib.crc32(blob[:-4]) & 0xFFFFFFFF
     if stored != computed:
         raise ValueError("model_weights: CRC mismatch")
-    w0, w1, w2 = struct.unpack("<fff", blob[:12])
+    w0, w1, w2 = struct.unpack("<ddd", blob[:24])
     return [float(w0), float(w1), float(w2)]
 
 # ---------------------------------------------------------------------------
@@ -653,7 +656,7 @@ def encode_metadata(meta: Dict[str, Any]) -> bytes:
     _field(FIELD_MORPH_CODES,  _enc_int_nested([[int(x) for x in s] for s in meta.get("morph_codes",  [])]))
     _field(FIELD_ROOT_LENGTHS, _enc_int_nested([[int(x) for x in s] for s in meta.get("root_lengths", [])]))
 
-    # Model weights — all 3 stored as float32
+    # Model weights — stored as float64 to preserve exact values
     _field(FIELD_MODEL_WEIGHTS, _enc_model_weights(list(meta.get("model_weights", [1/3, 1/3, 1/3]))))
 
     # Sparse dicts (context tables)
