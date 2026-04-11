@@ -947,7 +947,7 @@ _acf9_cases = [
     ("world",   CASE_TITLE, 0,        "World"),
     ("nato",    CASE_UPPER, 0,        "NATO"),
     ("ebook",   CASE_MIXED, 0b10,     "eBook"),
-    ("iphone",  CASE_MIXED, 0b1,      "iPhone"),
+    ("iphone",  CASE_MIXED, 0b10,     "iPhone"),
     ("abc",     CASE_MIXED, 0b111,    "ABC"),
     ("abc",     CASE_MIXED, 0b0,      "abc"),
     ("a",       CASE_TITLE, 0,        "A"),
