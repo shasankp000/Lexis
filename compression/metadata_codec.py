@@ -404,6 +404,11 @@ def _dec_float_nested(blob: bytes) -> List[List[float]]:
     return out
 
 # ---- mode: sparse_dict (dict[int, dict[int, int]]) -----------------------
+# Wire format per parent:
+#   zigzag-varint  parent_key_delta
+#   varint         n_child
+#   n_child x zigzag-varint  child_key_deltas  (sorted, delta from 0 each parent)
+#   n_child x varint         child_values      (unsigned — counts are always >= 0)
 
 def _enc_sparse_dict(d: Dict[int, Dict[int, int]]) -> bytes:
     blob = bytearray()
@@ -420,8 +425,9 @@ def _enc_sparse_dict(d: Dict[int, Dict[int, int]]) -> bytes:
         for ck in child_keys:
             blob.extend(_enc_varint(_zz_enc(ck - last_child)))
             last_child = ck
+        # values are unsigned counts — no zigzag needed
         for ck in child_keys:
-            blob.extend(_enc_varint(_zz_enc(children[ck])))
+            blob.extend(_enc_varint(children[ck]))
     crc = zlib.crc32(bytes(blob)) & 0xFFFFFFFF
     blob.extend(struct.pack("<I", crc))
     return bytes(blob)
@@ -445,7 +451,8 @@ def _dec_sparse_dict(blob: bytes) -> Dict[int, Dict[int, int]]:
             ck         = last_child + _zz_dec(_dec_varint(it))
             last_child = ck
             child_keys.append(ck)
-        values = [_zz_dec(_dec_varint(it)) for _ in range(n_child)]
+        # values are unsigned counts
+        values = [_dec_varint(it) for _ in range(n_child)]
         out[pk] = dict(zip(child_keys, values))
     return out
 
@@ -500,19 +507,16 @@ def _dec_pos_freq(blob: bytes) -> Dict[str, int]:
 
 def _enc_symbol_table(d: Dict[str, str]) -> bytes:
     blob = bytearray()
-    # Sort by type then index for stable output
     entries: List[Tuple[int, int, str]] = []
     for key, surface in d.items():
         if key.startswith("\u00a7E"):
             try:
-                idx = int(key[2:])
-                entries.append((0, idx, surface))
+                entries.append((0, int(key[2:]), surface))
             except ValueError:
                 pass
         elif key.startswith("\u00a7R"):
             try:
-                idx = int(key[2:])
-                entries.append((1, idx, surface))
+                entries.append((1, int(key[2:]), surface))
             except ValueError:
                 pass
     entries.sort()
@@ -546,20 +550,14 @@ def _dec_symbol_table(blob: bytes) -> Dict[str, str]:
         out[f"{prefix}{key_index}"] = surface
     return out
 
-# ---- mode: model_weights (list[float], always 3 elements) ---------------
-# Encodes as two uint16 values (first two weights scaled to 0..10000);
-# third weight is derived as 1 - w0 - w1 at decode time.
-
-_WEIGHT_SCALE = 10_000
+# ---- mode: model_weights (list[float], exactly 3 elements) --------------
+# Stored as three IEEE-754 single-precision (float32) values + CRC.
+# This gives ~7 significant digits, far better than the old uint16 scheme
+# which had precision of only 0.0001 and derived w2 = 1 - w0 - w1 (lossy).
 
 def _enc_model_weights(weights: List[float]) -> bytes:
-    w = list(weights) + [0.0] * 3
-    w0 = round(w[0] * _WEIGHT_SCALE)
-    w1 = round(w[1] * _WEIGHT_SCALE)
-    # clamp to avoid overflow
-    w0 = max(0, min(_WEIGHT_SCALE, w0))
-    w1 = max(0, min(_WEIGHT_SCALE - w0, w1))
-    blob = struct.pack("<HH", w0, w1)
+    w = (list(weights) + [0.0, 0.0, 0.0])[:3]
+    blob = struct.pack("<fff", w[0], w[1], w[2])
     crc  = zlib.crc32(blob) & 0xFFFFFFFF
     return blob + struct.pack("<I", crc)
 
@@ -568,12 +566,8 @@ def _dec_model_weights(blob: bytes) -> List[float]:
     computed = zlib.crc32(blob[:-4]) & 0xFFFFFFFF
     if stored != computed:
         raise ValueError("model_weights: CRC mismatch")
-    w0_i, w1_i = struct.unpack("<HH", blob[:4])
-    w0 = w0_i / _WEIGHT_SCALE
-    w1 = w1_i / _WEIGHT_SCALE
-    w2 = max(0.0, 1.0 - w0 - w1)
-    # round to 4 d.p. to avoid fp noise
-    return [round(w0, 4), round(w1, 4), round(w2, 4)]
+    w0, w1, w2 = struct.unpack("<fff", blob[:12])
+    return [float(w0), float(w1), float(w2)]
 
 # ---------------------------------------------------------------------------
 # Envelope helpers
@@ -616,7 +610,7 @@ def encode_metadata(meta: Dict[str, Any]) -> bytes:
     _field(FIELD_COMPRESSED_BITSTREAM, bytes(meta["compressed_bitstream"]))
     _field(FIELD_POS_DELTAS_BITSTREAM, bytes(meta["pos_deltas_bitstream"]))
 
-    # Symbol table — values are plain strings, not tuples
+    # Symbol table
     _field(FIELD_SYMBOL_TABLE, _enc_symbol_table(meta.get("symbol_table", {})))
 
     # pos_deltas_counts: dict[int, int]
@@ -634,21 +628,21 @@ def encode_metadata(meta: Dict[str, Any]) -> bytes:
     _field(FIELD_CHAR_VOCAB,           _enc_flat_uint([int(x) for x in meta.get("char_vocab", [])]))
     _field(FIELD_MORPH_VOCAB,          _enc_flat_uint([int(x) for x in meta.get("morph_vocab", [])]))
 
-    # Float nested (pos_huffman_bits — wrap each scalar in a 1-element list)
+    # Float nested (pos_huffman_bits)
     phb: List[List[float]] = [[float(x)] for x in meta.get("pos_huffman_bits", [])]
     _field(FIELD_POS_HUFFMAN_BITS, _enc_float_nested(phb))
 
-    # POS tags (nested list[list[str]])
+    # POS tags
     _field(FIELD_POS_TAGS, _enc_pos(meta.get("pos_tags", [])))
 
-    # Nested int arrays (morph_codes, root_lengths)
-    _field(FIELD_MORPH_CODES,   _enc_int_nested([[int(x) for x in s] for s in meta.get("morph_codes", [])]))
-    _field(FIELD_ROOT_LENGTHS,  _enc_int_nested([[int(x) for x in s] for s in meta.get("root_lengths", [])]))
+    # Nested int arrays
+    _field(FIELD_MORPH_CODES,  _enc_int_nested([[int(x) for x in s] for s in meta.get("morph_codes",  [])]))
+    _field(FIELD_ROOT_LENGTHS, _enc_int_nested([[int(x) for x in s] for s in meta.get("root_lengths", [])]))
 
-    # Model weights
-    _field(FIELD_MODEL_WEIGHTS, _enc_model_weights(list(meta.get("model_weights", [0.34, 0.33, 0.33]))))
+    # Model weights — all 3 stored as float32
+    _field(FIELD_MODEL_WEIGHTS, _enc_model_weights(list(meta.get("model_weights", [1/3, 1/3, 1/3]))))
 
-    # Sparse dicts
+    # Sparse dicts (context tables)
     char_ctx  = {int(k): {int(ck): int(cv) for ck, cv in v.items()} for k, v in meta.get("char_context",  {}).items()}
     morph_ctx = {int(k): {int(ck): int(cv) for ck, cv in v.items()} for k, v in meta.get("morph_context", {}).items()}
     struct_ctx: Dict[str, Dict[int, int]] = {str(k): {int(ck): int(cv) for ck, cv in v.items()} for k, v in meta.get("struct_context", {}).items()}
@@ -657,7 +651,7 @@ def encode_metadata(meta: Dict[str, Any]) -> bytes:
     _field(FIELD_MORPH_CONTEXT,  _enc_sparse_dict(morph_ctx))
     _field(FIELD_STRUCT_CONTEXT, _enc_sparse_dict_pos(struct_ctx))
 
-    # pos_vocab: encode as pos_freq with all counts = 1
+    # pos_vocab
     pv_freq = {tag: 1 for tag in meta.get("pos_vocab", []) if tag in TAG_TO_ID}
     _field(FIELD_POS_VOCAB, _enc_pos_freq(pv_freq))
 
@@ -683,30 +677,24 @@ def decode_metadata(data: bytes) -> Dict[str, Any]:
 
     meta: Dict[str, Any] = {}
 
-    # Raw bitstreams
-    meta["compressed_bitstream"]  = _dec_raw(_get(FIELD_COMPRESSED_BITSTREAM))
-    meta["pos_deltas_bitstream"]   = _dec_raw(_get(FIELD_POS_DELTAS_BITSTREAM))
+    meta["compressed_bitstream"] = _dec_raw(_get(FIELD_COMPRESSED_BITSTREAM))
+    meta["pos_deltas_bitstream"]  = _dec_raw(_get(FIELD_POS_DELTAS_BITSTREAM))
 
-    # Symbol table
     st_blob = _get(FIELD_SYMBOL_TABLE)
     meta["symbol_table"] = _dec_symbol_table(st_blob) if st_blob else {}
 
-    # pos_deltas_counts
     pdc_blob = _get(FIELD_POS_DELTAS_COUNTS)
     meta["pos_deltas_counts"] = _dec_flat_dict(pdc_blob) if pdc_blob else {}
 
-    # Scalars
-    meta["pos_deltas_count"]  = _dec_scalar(_get(FIELD_POS_DELTAS_COUNT))  if _get(FIELD_POS_DELTAS_COUNT)  else 0
-    meta["num_symbols"]       = _dec_scalar(_get(FIELD_NUM_SYMBOLS))       if _get(FIELD_NUM_SYMBOLS)       else 0
-    meta["num_char_classes"]  = _dec_scalar(_get(FIELD_NUM_CHAR_CLASSES))  if _get(FIELD_NUM_CHAR_CLASSES)  else 7
+    meta["pos_deltas_count"] = _dec_scalar(_get(FIELD_POS_DELTAS_COUNT)) if _get(FIELD_POS_DELTAS_COUNT) else 0
+    meta["num_symbols"]      = _dec_scalar(_get(FIELD_NUM_SYMBOLS))      if _get(FIELD_NUM_SYMBOLS)      else 0
+    meta["num_char_classes"] = _dec_scalar(_get(FIELD_NUM_CHAR_CLASSES)) if _get(FIELD_NUM_CHAR_CLASSES) else 7
 
-    # Flat uint
     meta["sentence_char_counts"] = _dec_flat_uint(_get(FIELD_SENTENCE_CHAR_COUNTS)) if _get(FIELD_SENTENCE_CHAR_COUNTS) else []
     meta["pos_n_tags"]           = _dec_flat_uint(_get(FIELD_POS_N_TAGS))           if _get(FIELD_POS_N_TAGS)           else []
     meta["char_vocab"]           = _dec_flat_uint(_get(FIELD_CHAR_VOCAB))           if _get(FIELD_CHAR_VOCAB)           else []
     meta["morph_vocab"]          = _dec_flat_uint(_get(FIELD_MORPH_VOCAB))          if _get(FIELD_MORPH_VOCAB)          else []
 
-    # Float nested
     phb_blob = _get(FIELD_POS_HUFFMAN_BITS)
     if phb_blob:
         nested = _dec_float_nested(phb_blob)
@@ -714,27 +702,20 @@ def decode_metadata(data: bytes) -> Dict[str, Any]:
     else:
         meta["pos_huffman_bits"] = []
 
-    # POS tags
-    meta["pos_tags"]   = _dec_pos(_get(FIELD_POS_TAGS))         if _get(FIELD_POS_TAGS)   else []
-
-    # Nested int
+    meta["pos_tags"]     = _dec_pos(_get(FIELD_POS_TAGS))             if _get(FIELD_POS_TAGS)     else []
     meta["morph_codes"]  = _dec_int_nested(_get(FIELD_MORPH_CODES))  if _get(FIELD_MORPH_CODES)  else []
     meta["root_lengths"] = _dec_int_nested(_get(FIELD_ROOT_LENGTHS)) if _get(FIELD_ROOT_LENGTHS) else []
 
-    # Model weights
     mw_blob = _get(FIELD_MODEL_WEIGHTS)
-    meta["model_weights"] = _dec_model_weights(mw_blob) if mw_blob else [0.34, 0.33, 0.33]
+    meta["model_weights"] = _dec_model_weights(mw_blob) if mw_blob else [1/3, 1/3, 1/3]
 
-    # Sparse dicts
-    meta["char_context"]  = _dec_sparse_dict(_get(FIELD_CHAR_CONTEXT))     if _get(FIELD_CHAR_CONTEXT)  else {}
-    meta["morph_context"] = _dec_sparse_dict(_get(FIELD_MORPH_CONTEXT))    if _get(FIELD_MORPH_CONTEXT) else {}
-    meta["struct_context"]= _dec_sparse_dict_pos(_get(FIELD_STRUCT_CONTEXT)) if _get(FIELD_STRUCT_CONTEXT) else {}
+    meta["char_context"]   = _dec_sparse_dict(_get(FIELD_CHAR_CONTEXT))       if _get(FIELD_CHAR_CONTEXT)   else {}
+    meta["morph_context"]  = _dec_sparse_dict(_get(FIELD_MORPH_CONTEXT))      if _get(FIELD_MORPH_CONTEXT)  else {}
+    meta["struct_context"] = _dec_sparse_dict_pos(_get(FIELD_STRUCT_CONTEXT)) if _get(FIELD_STRUCT_CONTEXT) else {}
 
-    # pos_vocab
     pv_blob = _get(FIELD_POS_VOCAB)
     meta["pos_vocab"] = list(_dec_pos_freq(pv_blob).keys()) if pv_blob else []
 
-    # pos_freq_table
     pft_blob = _get(FIELD_POS_FREQ_TABLE)
     meta["pos_freq_table"] = _dec_pos_freq(pft_blob) if pft_blob else {}
 
