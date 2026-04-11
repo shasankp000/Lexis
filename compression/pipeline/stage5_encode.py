@@ -19,6 +19,66 @@ from compression.alphabet.phonetic_map import (
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
 from compression.pipeline.stage3_syntax import SyntaxResult
 
+# ---------------------------------------------------------------------------
+# Case-flag constants
+# ---------------------------------------------------------------------------
+# 0  all-lower      e.g. "the", "quick"
+# 1  Title-case     e.g. "The", "Project"  (first char upper, rest lower)
+# 2  ALL-CAPS       e.g. "USA", "HTTP"
+# 3  mixed          e.g. "eBook", "iPhone"  (char-level bitmap packed below)
+#
+# For flag 3 a secondary bitmap is stored: one bit per character of the
+# *root* (not the surface form), 1 = uppercase.  The bitmap is packed into
+# an integer and appended to case_flags_mixed list at the same index.
+
+CASE_LOWER = 0
+CASE_TITLE = 1
+CASE_UPPER = 2
+CASE_MIXED = 3
+
+
+def compute_case_flag(surface: str) -> Tuple[int, int]:
+    """Return (flag, bitmap) for a single token surface form.
+
+    bitmap is only meaningful when flag == CASE_MIXED; otherwise 0.
+    """
+    if not surface:
+        return CASE_LOWER, 0
+    if surface.islower():
+        return CASE_LOWER, 0
+    if surface.isupper():
+        return CASE_UPPER, 0
+    if surface[0].isupper() and surface[1:].islower():
+        return CASE_TITLE, 0
+    # mixed — pack a per-char bitmap
+    bitmap = 0
+    for i, ch in enumerate(surface):
+        if ch.isupper():
+            bitmap |= (1 << i)
+    return CASE_MIXED, bitmap
+
+
+def apply_case_flag(word: str, flag: int, bitmap: int = 0) -> str:
+    """Apply a case flag (and optional bitmap) to a lowercase word."""
+    if not word:
+        return word
+    if flag == CASE_LOWER:
+        return word
+    if flag == CASE_TITLE:
+        return word[0].upper() + word[1:]
+    if flag == CASE_UPPER:
+        return word.upper()
+    # CASE_MIXED — apply bitmap
+    chars = list(word)
+    for i, ch in enumerate(chars):
+        if bitmap & (1 << i):
+            chars[i] = ch.upper()
+    return "".join(chars)
+
+
+# ---------------------------------------------------------------------------
+# Factoriadic helpers
+# ---------------------------------------------------------------------------
 
 def _encode_factoradic_unsigned(value: int) -> List[int]:
     """Encode a non-negative integer into factoriadic digits."""
@@ -349,13 +409,22 @@ class CharacterEncoder:
         """Encode a full sentence combining character and structural streams."""
         roots: List[str] = []
         morph_codes: List[int] = []
+        case_flags: List[int] = []
+        case_bitmaps: List[int] = []
+
         for item in morphology_results:
+            # item[0] is the original surface token (preserves case)
+            # item[1] is the root (already lowercased by Stage 2)
+            surface = item[0] if len(item) >= 1 else ""
             if len(item) == 3:
                 roots.append(item[1])
                 morph_codes.append(int(item[2]))
             else:
-                roots.append(item[0])
+                roots.append(item[0].lower())
                 morph_codes.append(BASE)
+            flag, bitmap = compute_case_flag(surface)
+            case_flags.append(flag)
+            case_bitmaps.append(bitmap)
 
         char_encoding = self.encode_sentence(morphology_results)
         triples = _triples_for_sentence(roots)
@@ -382,6 +451,9 @@ class CharacterEncoder:
             "pos_huffman_bits": pos_encoding["pos_huffman_bits"],
             "pos_huffman_codes": pos_encoding["pos_huffman_codes"],
             "pos_n_tags": pos_encoding["tag_count"],
+            # case restoration
+            "case_flags": case_flags,
+            "case_bitmaps": case_bitmaps,
         }
 
     def decode_word(self, encoded: Dict[str, List[int]]) -> str:
