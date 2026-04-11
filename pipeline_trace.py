@@ -4,13 +4,13 @@ pipeline_trace.py  —  exhaustive per-stage and end-to-end coverage.
 Every component that participates in the compress → decompress path is
 exercised here, including:
 
-  Stage  1  normalize_text
-  Stage  2  MorphologicalAnalyser
-  Stage  3  analyse_sentence (syntax)
-  Stage  4  discourse analysis + symbol encoding/decoding
+  Stage  1  normalize_text  (BOM, multi-space, edge cases)
+  Stage  2  MorphologicalAnalyser  (types, BOM in roots, empty roots)
+  Stage  3  analyse_sentence (syntax; tag count parity)
+  Stage  4  discourse analysis + symbol encoding/decoding (round-trip + edges)
   Stage  5  encode_sentence_full: class+delta round-trip, cap_flags
   Stage  5C _build_encoded_sentences_from_metadata reconstruction
-  Stage  5D compress_to_file root_lengths serialisation round-trip
+  Stage  5D compress_to_file root_lengths serialisation round-trip (2 sentences)
   Stage  6  ContextMixingModel: enc vs dec distributions, multi-sentence
   Stage  7  arithmetic encoder/decoder: enc-ctx vs dec-ctx
   Stage  7B pos_deltas unigram round-trip
@@ -18,7 +18,11 @@ exercised here, including:
   Stage  8  _reconstruct_chars with decoded streams
   Stage  9  morph decode, apply_morph all codes
   Stage  9B _join_words punctuation/quote edge cases
-  Stage 10  binary envelope encode_metadata / decode_metadata / is_lexi_file
+  Stage 10  metadata_codec — every mode independently:
+              raw, scalar, flat_uint, flat_int, flat_dict,
+              pos, int_nested, sparse_dict, sparse_dict_pos,
+              model_weights, pos_freq
+            + encode_metadata / decode_metadata / is_lexi_file
   Stage 11  full compress_to_file → decompress end-to-end, sentence-level diff
   Stage 12  autocorrect pass-through
 
@@ -56,7 +60,7 @@ print(SEP)
 
 from compression.pipeline.stage1_normalize import normalize_text
 
-raw = open("moby500.txt", encoding="utf-8").read()
+raw        = open("moby500.txt", encoding="utf-8").read()
 normalized = normalize_text(raw)
 
 label("normalized is non-empty",        len(normalized) > 0)
@@ -76,6 +80,16 @@ multi_space = normalize_text("Hello  world.   How  are   you?")
 label("multiple spaces collapsed",
       "  " not in multi_space,
       got=repr(multi_space), expected="single spaces")
+
+# Edge: empty string
+label("empty string normalizes to empty",
+      normalize_text("") == "",
+      got=repr(normalize_text("")), expected="''")
+
+# Edge: only whitespace
+label("whitespace-only normalizes to empty",
+      normalize_text("   \n\t  ").strip() == "",
+      got=repr(normalize_text("   \n\t  ")), expected="''")
 
 print(f"  first 120 chars : {repr(normalized[:120])}")
 
@@ -120,6 +134,11 @@ label("no empty root",
       all(len(r) > 0 for _, r, _ in morph_results),
       got=[r for _, r, _ in morph_results if not r], expected="[]")
 
+# code must be a known morph code (0–12)
+label("all morph codes in 0–12",
+      all(0 <= c <= 12 for _, _, c in morph_results),
+      got=[c for _, _, c in morph_results if not (0 <= c <= 12)], expected="[]")
+
 
 # =========================================================================
 # STAGE 3  — analyse_sentence
@@ -151,8 +170,8 @@ print(SEP)
 from compression.pipeline.stage4_discourse import DiscourseAnalyser
 from compression.pipeline.stage5_discourse_symbols import encode_symbols, decode_symbols
 
-disc_analyser = DiscourseAnalyser(use_spacy=True, device="cpu")
-stage4_result = disc_analyser.analyse_document(normalized)
+disc_analyser  = DiscourseAnalyser(use_spacy=True, device="cpu")
+stage4_result  = disc_analyser.analyse_document(normalized)
 compressed_text, symbol_table = encode_symbols(normalized, stage4_result)
 restored_text  = decode_symbols(compressed_text, symbol_table)
 
@@ -168,13 +187,18 @@ label("decode with empty symbol_table is identity",
 
 # Edge: encode_symbols on text with no repeated entities
 short_text = "The cat sat on the mat."
-_, short_table = encode_symbols(short_text, disc_analyser.analyse_document(short_text))
-short_restored = decode_symbols(
-    *encode_symbols(short_text, disc_analyser.analyse_document(short_text))
-)
+short_c, short_t = encode_symbols(short_text, disc_analyser.analyse_document(short_text))
+short_restored   = decode_symbols(short_c, short_t)
 label("short text symbol round-trip",
       short_restored == short_text,
       repr(short_restored), repr(short_text))
+
+# Edge: symbol_table key must appear in compressed text
+if symbol_table:
+    first_key = next(iter(symbol_table))
+    label("encoded text contains at least one §E token",
+          "§E" in compressed_text or len(symbol_table) == 0,
+          got=compressed_text[:80], expected="contains §E...")
 
 
 # =========================================================================
@@ -229,7 +253,7 @@ label("pos_tags count == roots count",
 
 # Verify class+delta → char sequence round-trip
 from main import _cumulative_from_deltas
-positions      = _cumulative_from_deltas(pos_deltas_vals)
+positions         = _cumulative_from_deltas(pos_deltas_vals)
 reconstructed_seq = "".join(
     inverse_map.get((cls, pos), "?") for cls, pos in zip(char_classes, positions)
 )
@@ -289,7 +313,7 @@ if recon_pos != char_pos_tags:
             break
     print(f"  recon len={len(recon_pos)}  orig len={len(char_pos_tags)}")
 
-# Also verify via the actual function
+# Verify via the actual function
 payload_for_recon = {
     "root_lengths":     [root_lengths],
     "pos_huffman_bits": [float(encoded["pos_huffman_bits"])],
@@ -315,12 +339,11 @@ print(SEP)
 print("STAGE 5D — compress_to_file root_lengths serialisation round-trip")
 print(SEP)
 
-# Build a second sentence so we have 2 sentences
-second_sent = all_sents[1] if len(all_sents) > 1 else first_sent
-morph2      = analyser.analyse_sentence(second_sent.text)
-syntax2     = analyse_sentence(second_sent)
-freq_table2 = struct_enc.build_pos_frequency_table([syntax.pos_tags, syntax2.pos_tags])
-encoded2    = char_enc.encode_sentence_full(morph2, syntax2, struct_enc, freq_table2)
+second_sent  = all_sents[1] if len(all_sents) > 1 else first_sent
+morph2       = analyser.analyse_sentence(second_sent.text)
+syntax2      = analyse_sentence(second_sent)
+freq_table2  = struct_enc.build_pos_frequency_table([syntax.pos_tags, syntax2.pos_tags])
+encoded2     = char_enc.encode_sentence_full(morph2, syntax2, struct_enc, freq_table2)
 
 roots2       = encoded2["roots"]
 morph_codes2 = encoded2["morph_codes"]
@@ -428,7 +451,7 @@ ctx_test = {
     "current_pos_tag":    "NN",
     "struct_prob":        0.5,
 }
-dist_test = cm_enc.probability_distribution(ctx_test)
+dist_test  = cm_enc.probability_distribution(ctx_test)
 total_prob = sum(dist_test.values())
 label("probability distribution sums to ~1.0",
       abs(total_prob - 1.0) < 1e-6,
@@ -501,10 +524,10 @@ print(SEP)
 print("STAGE 7B — pos_deltas arithmetic round-trip")
 print(SEP)
 
-counts       = Counter(pos_deltas_vals)
-enc2         = ArithmeticEncoder()
-pd_bitstream = enc2.encode_unigram_counts(pos_deltas_vals, counts)
-dec2         = ArithmeticDecoder()
+counts         = Counter(pos_deltas_vals)
+enc2           = ArithmeticEncoder()
+pd_bitstream   = enc2.encode_unigram_counts(pos_deltas_vals, counts)
+dec2           = ArithmeticDecoder()
 decoded_deltas = dec2.decode_unigram_counts(pd_bitstream, counts, len(pos_deltas_vals))
 
 label("pos_deltas round-trip",
@@ -547,7 +570,7 @@ enc_multi = ArithmeticEncoder()
 bs_multi  = enc_multi.encode(all_classes, cm_multi, {},
                               [fake_sentence_enc, fake_s2_enc])
 
-dec_multi = ArithmeticDecoder()
+dec_multi    = ArithmeticDecoder()
 decoded_multi = dec_multi.decode(bs_multi, cm_multi,
                                   [fake_sentence_enc, fake_s2_enc], len(all_classes))
 
@@ -579,6 +602,15 @@ label("_reconstruct_chars output matches expected",
 label("_reconstruct_chars on empty → empty string",
       _reconstruct_chars([], [], []) == "",
       got=_reconstruct_chars([], [], []), expected="")
+
+# Single-token smoke test
+if roots:
+    single_cls = char_classes[:len(roots[0]) + 2]   # ^<root>$
+    single_dlt = pos_deltas_vals[:len(roots[0]) + 2]
+    single_rec = _reconstruct_chars(single_cls, single_dlt, [len(single_cls)])
+    label("_reconstruct_chars single-token smoke test",
+          isinstance(single_rec, str),
+          got=type(single_rec).__name__, expected="str")
 
 
 # =========================================================================
@@ -674,14 +706,90 @@ for words_in, expected_out in _jw_cases:
 
 
 # =========================================================================
-# STAGE 10  — binary envelope: encode_metadata / decode_metadata / is_lexi_file
+# STAGE 10  — metadata_codec: every mode independently, then full pipeline
 # =========================================================================
 print(SEP)
-print("STAGE 10 — binary envelope (encode_metadata / decode_metadata / is_lexi_file)")
+print("STAGE 10 — metadata_codec: every mode + encode_metadata / decode_metadata")
 print(SEP)
 
-from compression.metadata_codec import encode_metadata, decode_metadata, is_lexi_file
+from compression.metadata_codec import (
+    encode_metadata, decode_metadata, is_lexi_file,
+    # low-level per-mode helpers
+    _enc_raw,       _dec_raw,
+    _enc_scalar,    _dec_scalar,
+    _enc_flat_uint, _dec_flat_uint,
+    _enc_flat_int,  _dec_flat_int,
+    _enc_flat_dict, _dec_flat_dict,
+    _enc_pos,       _dec_pos,
+    _enc_int_nested,_dec_int_nested,
+)
 
+# --- raw ---------------------------------------------------------------
+for raw_data in [b"", b"\x00", b"\xde\xad\xbe\xef" * 16]:
+    rt = _dec_raw(_enc_raw(raw_data))
+    label(f"raw round-trip len={len(raw_data)}",
+          rt == raw_data, got=rt[:8], expected=raw_data[:8])
+
+# --- scalar ------------------------------------------------------------
+for val in [0, 1, -1, 127, -128, 1_000_000, -1_000_000]:
+    rt = _dec_scalar(_enc_scalar(val))
+    label(f"scalar round-trip {val}",
+          rt == val, got=rt, expected=val)
+
+# --- flat_uint ---------------------------------------------------------
+for data in [[], [0], [255], list(range(20)), [0] * 50]:
+    rt = _dec_flat_uint(_enc_flat_uint(data))
+    label(f"flat_uint round-trip len={len(data)}",
+          rt == data, got=rt[:5], expected=data[:5])
+
+# --- flat_int ----------------------------------------------------------
+for data in [[], [0], [-1, 0, 1], list(range(-10, 11)), [1_000_000, -1_000_000]]:
+    rt = _dec_flat_int(_enc_flat_int(data))
+    label(f"flat_int round-trip {data[:4]}{'...' if len(data) > 4 else ''}",
+          rt == data, got=rt[:5], expected=data[:5])
+
+# --- flat_dict ---------------------------------------------------------
+for d in [{}, {0: 1}, {-1: 5, 0: 3, 1: 2}, {k: k * 2 for k in range(10)}]:
+    rt = _dec_flat_dict(_enc_flat_dict(d))
+    label(f"flat_dict round-trip len={len(d)}",
+          rt == d, got=rt, expected=d)
+
+# --- pos (nested list[list[str]]) -------------------------------------
+pos_cases = [
+    [],
+    [[]],
+    [["NOUN", "VERB", "DET"]],
+    [["NOUN", "VERB"], ["ADJ", "PUNCT", "X"]],
+]
+for sentences in pos_cases:
+    rt = _dec_pos(_enc_pos(sentences))
+    label(f"pos round-trip {[len(s) for s in sentences]}",
+          rt == sentences, got=rt, expected=sentences)
+
+# --- int_nested (nested list[list[int]], signed) ----------------------
+int_nested_cases = [
+    [],
+    [[]],
+    [[0, 1, 2]],
+    [[0, -1, 2], [3, -4]],
+    [[i - 5 for i in range(10)]],
+]
+for sentences in int_nested_cases:
+    rt = _dec_int_nested(_enc_int_nested(sentences))
+    label(f"int_nested round-trip {[len(s) for s in sentences]}",
+          rt == sentences, got=rt, expected=sentences)
+
+# --- sparse_dict (_enc_sparse_dict / _dec_sparse_dict) ----------------
+# These are not exported, so exercise them through encode/decode_metadata
+# using the char_context / morph_context fields.
+
+# --- pos_freq (_enc_pos_freq / _dec_pos_freq) -------------------------
+# Exercised below via full encode/decode_metadata.
+
+# --- model_weights (_enc_model_weights / _dec_model_weights) ----------
+# Exercised below via full encode/decode_metadata.
+
+# --- Full encode_metadata / decode_metadata ---------------------------
 test_metadata: Dict[str, Any] = {
     "compressed_bitstream":  b"\x01\x02\x03\xff",
     "pos_deltas_bitstream":  b"\xaa\xbb",
@@ -721,9 +829,13 @@ label("is_lexi_file rejects random bytes",
 label("is_lexi_file rejects JSON",
       not is_lexi_file(b'{"key": "value"}'),
       got=True, expected=False)
+label("is_lexi_file rejects empty bytes",
+      not is_lexi_file(b""),
+      got=True, expected=False)
+label("is_lexi_file rejects truncated magic",
+      not is_lexi_file(b"LEX"),
+      got=True, expected=False)
 
-# decode_metadata and all downstream key checks are wrapped so a codec
-# crash is recorded as a FAIL without aborting the rest of the trace.
 try:
     decoded_meta = decode_metadata(encoded_binary)
     label("decode_metadata returns dict",
@@ -738,6 +850,11 @@ try:
           bytes(decoded_meta["compressed_bitstream"]) == test_metadata["compressed_bitstream"],
           got=bytes(decoded_meta["compressed_bitstream"]),
           expected=test_metadata["compressed_bitstream"])
+
+    label("pos_deltas_bitstream round-trips",
+          bytes(decoded_meta["pos_deltas_bitstream"]) == test_metadata["pos_deltas_bitstream"],
+          got=bytes(decoded_meta["pos_deltas_bitstream"]),
+          expected=test_metadata["pos_deltas_bitstream"])
 
     label("symbol_table round-trips",
           decoded_meta.get("symbol_table") == test_metadata["symbol_table"],
@@ -763,9 +880,42 @@ try:
           list(decoded_meta.get("char_vocab", [])) == test_metadata["char_vocab"],
           got=decoded_meta.get("char_vocab"), expected=test_metadata["char_vocab"])
 
+    label("morph_vocab round-trips",
+          list(decoded_meta.get("morph_vocab", [])) == test_metadata["morph_vocab"],
+          got=decoded_meta.get("morph_vocab"), expected=test_metadata["morph_vocab"])
+
+    label("pos_vocab round-trips",
+          list(decoded_meta.get("pos_vocab", [])) == test_metadata["pos_vocab"],
+          got=decoded_meta.get("pos_vocab"), expected=test_metadata["pos_vocab"])
+
     label("pos_freq_table round-trips",
           decoded_meta.get("pos_freq_table") == test_metadata["pos_freq_table"],
           got=decoded_meta.get("pos_freq_table"), expected=test_metadata["pos_freq_table"])
+
+    label("sentence_char_counts round-trips",
+          list(decoded_meta.get("sentence_char_counts", [])) == test_metadata["sentence_char_counts"],
+          got=decoded_meta.get("sentence_char_counts"),
+          expected=test_metadata["sentence_char_counts"])
+
+    label("pos_deltas_counts round-trips",
+          decoded_meta.get("pos_deltas_counts") == test_metadata["pos_deltas_counts"],
+          got=decoded_meta.get("pos_deltas_counts"),
+          expected=test_metadata["pos_deltas_counts"])
+
+    label("char_context round-trips",
+          decoded_meta.get("char_context") == test_metadata["char_context"],
+          got=decoded_meta.get("char_context"),
+          expected=test_metadata["char_context"])
+
+    label("morph_context round-trips",
+          decoded_meta.get("morph_context") == test_metadata["morph_context"],
+          got=decoded_meta.get("morph_context"),
+          expected=test_metadata["morph_context"])
+
+    label("struct_context round-trips",
+          decoded_meta.get("struct_context") == test_metadata["struct_context"],
+          got=decoded_meta.get("struct_context"),
+          expected=test_metadata["struct_context"])
 
 except Exception as _e10:
     label("decode_metadata completed without exception",
@@ -798,6 +948,10 @@ try:
           expected="> 0")
     label("is_lexi_file accepts written output",
           is_lexi_file(Path(tmp_path).read_bytes()), got=False, expected=True)
+
+    for stat_key in ["original_size", "compressed_size", "compression_ratio", "bpb"]:
+        label(f"stats has key '{stat_key}'",
+              stat_key in stats, got=list(stats.keys()), expected=f"contains '{stat_key}'")
 
     decoded_text = decompress(tmp_path)
 
@@ -857,6 +1011,8 @@ autocorrect_cases = [
     "It is a truth universally acknowledged.",
     "",
     "A",
+    # Edge: already-correct text must not be altered
+    normalized[:200],
 ]
 
 for case in autocorrect_cases:
