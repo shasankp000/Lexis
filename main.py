@@ -47,6 +47,35 @@ from compression.pipeline.stage7_arithmetic import ArithmeticDecoder, Arithmetic
 from compression.pipeline.stage9_autocorrect import autocorrect
 from compression.pipeline.utils import chunk_text
 
+_LEXI_ZSTD_MAGIC = b"LXZ1"
+
+
+def _maybe_wrap_zstd(payload: bytes) -> tuple[bytes, bool]:
+    """Optionally wrap payload with zstd if module exists and it helps size."""
+    try:
+        import zstandard as zstd  # type: ignore
+    except Exception:
+        return payload, False
+
+    compressed = zstd.ZstdCompressor(level=9).compress(payload)
+    wrapped = _LEXI_ZSTD_MAGIC + compressed
+    if len(wrapped) < len(payload):
+        return wrapped, True
+    return payload, False
+
+
+def _maybe_unwrap_zstd(payload: bytes) -> bytes:
+    """Unwrap zstd-wrapped payload if magic is present."""
+    if not payload.startswith(_LEXI_ZSTD_MAGIC):
+        return payload
+    try:
+        import zstandard as zstd  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "File is zstd-wrapped (LXZ1) but 'zstandard' is not installed."
+        ) from exc
+    return zstd.ZstdDecompressor().decompress(payload[len(_LEXI_ZSTD_MAGIC):])
+
 
 def _get_nlp(model: str | None = None):
     model_name = model or SPACY_MODEL
@@ -202,16 +231,20 @@ def _reconstruct_chars(
 def _split_roots(char_stream: str) -> List[str]:
     roots: List[str] = []
     current: List[str] = []
+    in_token = False
     for char in char_stream:
         if char == "^":
             current = []
+            in_token = True
         elif char == "$":
-            if current:
+            if in_token:
                 roots.append("".join(current))
             current = []
+            in_token = False
         else:
-            current.append(char)
-    if current:
+            if in_token:
+                current.append(char)
+    if in_token:
         roots.append("".join(current))
     return roots
 
