@@ -38,6 +38,46 @@ CASE_TITLE = 1
 CASE_UPPER = 2
 CASE_MIXED = 3
 
+def _mixed_case_bitmap_for_surface(surface: str) -> int:
+    """Pack uppercase positions using direct char-index mapping.
+
+    For example:
+      eBook  -> bit 1 set (0b10)
+      iPhone -> bit 1 set (0b10)
+    """
+    bitmap = 0
+    for idx, ch in enumerate(surface):
+        if ch.isupper():
+            bitmap |= (1 << idx)
+    return bitmap
+
+def _mixed_case_bitmap_for_surface(surface: str) -> int:
+    """Pack uppercase positions using direct char-index mapping.
+
+    For example:
+      eBook  -> bit 1 set (0b10)
+      iPhone -> bit 1 set (0b10)
+    """
+    bitmap = 0
+    for idx, ch in enumerate(surface):
+        if ch.isupper():
+            bitmap |= (1 << idx)
+    return bitmap
+
+
+def _mixed_case_bitmap_for_surface(surface: str) -> int:
+    """Pack uppercase positions using direct char-index mapping.
+
+    For example:
+      eBook  -> bit 1 set (0b10)
+      iPhone -> bit 1 set (0b10)
+    """
+    bitmap = 0
+    for idx, ch in enumerate(surface):
+        if ch.isupper():
+            bitmap |= (1 << idx)
+    return bitmap
+
 
 def _mixed_case_bitmap_for_surface(surface: str) -> int:
     """Pack uppercase positions using direct char-index mapping.

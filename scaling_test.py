@@ -167,6 +167,7 @@ def main() -> None:
     top_k = int(args.compact_top_k) if args.compact_top_k is not None else preset_top_k
     scale = int(args.compact_scale) if args.compact_scale is not None else preset_scale
 
+
     rows = run_scaling_test(
         args.input,
         args.sizes,
