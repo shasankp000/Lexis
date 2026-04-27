@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import struct
 import zlib
+import importlib
+import importlib.util
 from collections import Counter
 from typing import Any, Dict, List, Tuple
 
@@ -70,6 +72,12 @@ FIELD_CASE_BITMAPS          = 22
 
 MAGIC   = b"LEXI"
 VERSION = 0x01
+_FIELD_ZSTD_MAGIC = b"ZC1"
+_FIELD_ZSTD_TARGETS = {
+    FIELD_CHAR_CONTEXT,
+    FIELD_MORPH_CONTEXT,
+    FIELD_STRUCT_CONTEXT,
+}
 
 # ---------------------------------------------------------------------------
 # UPOS constants (must match main.py / stage3)
@@ -122,6 +130,40 @@ def _dec_varint(it) -> int:
         if not (byte & 0x80):
             return num
         shift += 7
+        if shift > 63:
+            raise ValueError("varint too long")
+
+
+def _zstd_available() -> bool:
+    return importlib.util.find_spec("zstandard") is not None
+
+
+def _maybe_wrap_field_zstd(blob: bytes, min_size: int = 512, level: int = 6) -> bytes:
+    """Optionally zstd-wrap a field blob when it provides net savings."""
+    if len(blob) < min_size or not _zstd_available():
+        return blob
+    zstd = importlib.import_module("zstandard")
+    compressed = zstd.ZstdCompressor(level=level).compress(blob)
+    header = bytearray(_FIELD_ZSTD_MAGIC)
+    header.extend(_enc_varint(len(blob)))
+    wrapped = bytes(header) + compressed
+    return wrapped if len(wrapped) < len(blob) else blob
+
+
+def _maybe_unwrap_field_zstd(blob: bytes) -> bytes:
+    """Decode optional field-level zstd wrapper."""
+    if not blob.startswith(_FIELD_ZSTD_MAGIC):
+        return blob
+    if not _zstd_available():
+        raise RuntimeError("Field is zstd-wrapped (ZC1) but 'zstandard' is not installed.")
+    it = iter(blob[len(_FIELD_ZSTD_MAGIC):])
+    original_len = _dec_varint(it)
+    compressed = bytes(it)
+    zstd = importlib.import_module("zstandard")
+    out = zstd.ZstdDecompressor().decompress(compressed)
+    if len(out) != original_len:
+        raise ValueError("ZC1 field length mismatch after decompression")
+    return out
 
 # ---------------------------------------------------------------------------
 # Delta / RLE helpers
@@ -637,6 +679,8 @@ def encode_metadata(meta: Dict[str, Any]) -> bytes:
     parts = bytearray(MAGIC + bytes([VERSION]))
 
     def _field(fid: int, blob: bytes) -> None:
+        if fid in _FIELD_ZSTD_TARGETS:
+            blob = _maybe_wrap_field_zstd(blob)
         parts.extend(_pack_field(fid, blob))
 
     # Raw bitstreams
@@ -711,7 +755,7 @@ def decode_metadata(data: bytes) -> Dict[str, Any]:
     fields = _parse_fields(data[5:])
 
     def _get(fid: int) -> bytes:
-        return fields.get(fid, b"")
+        return _maybe_unwrap_field_zstd(fields.get(fid, b""))
 
     meta: Dict[str, Any] = {}
 
