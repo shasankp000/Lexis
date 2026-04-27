@@ -783,6 +783,7 @@ def main() -> None:
         preset_top_k, preset_scale = _COMPACT_CONTEXT_PRESETS[str(args.compact_profile)]
         top_k = int(args.compact_top_k) if args.compact_top_k is not None else preset_top_k
         scale = int(args.compact_scale) if args.compact_scale is not None else preset_scale
+
         compress_to_file(
             text,
             args.output,
