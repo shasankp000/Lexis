@@ -48,6 +48,10 @@ from compression.pipeline.stage9_autocorrect import autocorrect
 from compression.pipeline.utils import chunk_text
 
 _LEXI_ZSTD_MAGIC = b"LXZ1"
+_COMPACT_CONTEXT_PRESETS = {
+    "default": (6, 511),
+    "aggressive": (6, 127),
+}
 
 
 def _maybe_wrap_zstd(payload: bytes) -> tuple[bytes, bool]:
@@ -467,8 +471,8 @@ def compress_to_file(
     output_path: str,
     model: str | None = None,
     compact_context_mode: bool = False,
-    compact_context_top_k: int = 3,
-    compact_context_scale: int = 255,
+    compact_context_top_k: int = 6,
+    compact_context_scale: int = 511,
 ) -> Dict:
     """
     Full compression pipeline with arithmetic coding.
@@ -747,15 +751,21 @@ def main() -> None:
         help="Enable compact top-K quantized context maps for smaller metadata.",
     )
     compress_parser.add_argument(
+        "--compact-profile",
+        choices=sorted(_COMPACT_CONTEXT_PRESETS.keys()),
+        default="default",
+        help="Preset for compact context quantization (default/aggressive).",
+    )
+    compress_parser.add_argument(
         "--compact-top-k",
         type=int,
-        default=3,
+        default=None,
         help="Top-K transitions retained per context row in compact mode.",
     )
     compress_parser.add_argument(
         "--compact-scale",
         type=int,
-        default=255,
+        default=None,
         help="Quantization scale mass for compact context rows in compact mode.",
     )
 
@@ -770,13 +780,17 @@ def main() -> None:
 
     if args.command == "compress":
         text = _read_text(args.input)
+        preset_top_k, preset_scale = _COMPACT_CONTEXT_PRESETS[str(args.compact_profile)]
+        top_k = int(args.compact_top_k) if args.compact_top_k is not None else preset_top_k
+        scale = int(args.compact_scale) if args.compact_scale is not None else preset_scale
+
         compress_to_file(
             text,
             args.output,
             model=args.model,
             compact_context_mode=bool(args.compact_context),
-            compact_context_top_k=int(args.compact_top_k),
-            compact_context_scale=int(args.compact_scale),
+            compact_context_top_k=top_k,
+            compact_context_scale=scale,
         )
         print(f"Wrote LEXI archive to {args.output}")
     elif args.command == "decompress":
