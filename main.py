@@ -76,7 +76,6 @@ def _maybe_unwrap_zstd(payload: bytes) -> bytes:
         ) from exc
     return zstd.ZstdDecompressor().decompress(payload[len(_LEXI_ZSTD_MAGIC):])
 
-
 def _quantize_counter(counter: Counter[int], top_k: int = 3, scale: int = 255) -> Counter[int]:
     """Keep top-K entries and quantize counts to a compact integer scale."""
     if not counter:
@@ -120,7 +119,6 @@ def _compact_context_model(
             symbols.update(c.keys())
     model.char_vocab = sorted(int(s) for s in symbols)
     return model
-
 
 def _get_nlp(model: str | None = None):
     model_name = model or SPACY_MODEL

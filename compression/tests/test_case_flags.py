@@ -26,4 +26,3 @@ def test_apply_case_flag_mixed_bitmap_uses_char_index_bits():
     assert apply_case_flag("ab", CASE_MIXED, 0b10) == "aB"
     assert apply_case_flag("abcdef", CASE_MIXED, 0b101010) == "aBcDeF"
     assert apply_case_flag("abcdef", CASE_MIXED, 0b010101) == "AbCdEf"
-
