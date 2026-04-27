@@ -76,6 +76,7 @@ def _maybe_unwrap_zstd(payload: bytes) -> bytes:
         ) from exc
     return zstd.ZstdDecompressor().decompress(payload[len(_LEXI_ZSTD_MAGIC):])
 
+
 def _quantize_counter(counter: Counter[int], top_k: int = 3, scale: int = 255) -> Counter[int]:
     """Keep top-K entries and quantize counts to a compact integer scale."""
     if not counter:
@@ -119,6 +120,7 @@ def _compact_context_model(
             symbols.update(c.keys())
     model.char_vocab = sorted(int(s) for s in symbols)
     return model
+
 
 def _get_nlp(model: str | None = None):
     model_name = model or SPACY_MODEL
@@ -465,6 +467,8 @@ def compress_to_file(
     output_path: str,
     model: str | None = None,
     compact_context_mode: bool = False,
+    compact_context_top_k: int = 3,
+    compact_context_scale: int = 255,
 ) -> Dict:
     """
     Full compression pipeline with arithmetic coding.
@@ -493,7 +497,11 @@ def compress_to_file(
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
     if compact_context_mode:
-        _compact_context_model(context_model, top_k=3, scale=255)
+        _compact_context_model(
+            context_model,
+            top_k=max(1, int(compact_context_top_k)),
+            scale=max(8, int(compact_context_scale)),
+        )
 
     char_classes:          List[int]        = []
     char_pos_deltas:       List[int]        = []
@@ -575,6 +583,8 @@ def compress_to_file(
         "discourse_symbols":      len(symbol_table),
         "zstd_wrapped":           zstd_wrapped,
         "compact_context_mode":   compact_context_mode,
+        "compact_context_top_k":  int(compact_context_top_k),
+        "compact_context_scale":  int(compact_context_scale),
         "discourse_reduction_pct": round(100 * (orig_len - disc_len) / orig_len, 2)
                                    if orig_len else 0.0,
     }
@@ -736,6 +746,18 @@ def main() -> None:
         action="store_true",
         help="Enable compact top-K quantized context maps for smaller metadata.",
     )
+    compress_parser.add_argument(
+        "--compact-top-k",
+        type=int,
+        default=3,
+        help="Top-K transitions retained per context row in compact mode.",
+    )
+    compress_parser.add_argument(
+        "--compact-scale",
+        type=int,
+        default=255,
+        help="Quantization scale mass for compact context rows in compact mode.",
+    )
 
     decompress_parser = subparsers.add_parser("decompress", help="Decompress archive")
     decompress_parser.add_argument("input", help="Input binary file")
@@ -753,6 +775,8 @@ def main() -> None:
             args.output,
             model=args.model,
             compact_context_mode=bool(args.compact_context),
+            compact_context_top_k=int(args.compact_top_k),
+            compact_context_scale=int(args.compact_scale),
         )
         print(f"Wrote LEXI archive to {args.output}")
     elif args.command == "decompress":

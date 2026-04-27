@@ -51,6 +51,20 @@ def _mixed_case_bitmap_for_surface(surface: str) -> int:
             bitmap |= (1 << idx)
     return bitmap
 
+def _mixed_case_bitmap_for_surface(surface: str) -> int:
+    """Pack uppercase positions using direct char-index mapping.
+
+    For example:
+      eBook  -> bit 1 set (0b10)
+      iPhone -> bit 1 set (0b10)
+    """
+    bitmap = 0
+    for idx, ch in enumerate(surface):
+        if ch.isupper():
+            bitmap |= (1 << idx)
+    return bitmap
+
+
 def compute_case_flag(surface: str) -> Tuple[int, int]:
     """Return (flag, bitmap) for a single token surface form.
 

@@ -54,6 +54,8 @@ def run_scaling_test(
     sizes: list[int],
     model: str | None = None,
     compact_context_mode: bool = False,
+    compact_context_top_k: int = 3,
+    compact_context_scale: int = 255,
 ) -> list[dict[str, float | int | bool]]:
     source_text = Path(input_path).read_text(encoding="utf-8")
     rows: list[dict[str, float | int | bool]] = []
@@ -71,6 +73,8 @@ def run_scaling_test(
                 str(lexi_path),
                 model=model,
                 compact_context_mode=compact_context_mode,
+                compact_context_top_k=compact_context_top_k,
+                compact_context_scale=compact_context_scale,
             )
             decoded = decompress(str(lexi_path))
 
@@ -144,6 +148,8 @@ def main() -> None:
         action="store_true",
         help="Enable compact top-K quantized context maps during compression.",
     )
+    parser.add_argument("--compact-top-k", type=int, default=3)
+    parser.add_argument("--compact-scale", type=int, default=255)
     parser.add_argument("--csv", default=None, help="Optional CSV output path")
     args = parser.parse_args()
 
@@ -152,6 +158,8 @@ def main() -> None:
         args.sizes,
         model=args.model,
         compact_context_mode=bool(args.compact_context),
+        compact_context_top_k=int(args.compact_top_k),
+        compact_context_scale=int(args.compact_scale),
     )
 
     print(
