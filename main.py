@@ -76,6 +76,49 @@ def _maybe_unwrap_zstd(payload: bytes) -> bytes:
         ) from exc
     return zstd.ZstdDecompressor().decompress(payload[len(_LEXI_ZSTD_MAGIC):])
 
+def _quantize_counter(counter: Counter[int], top_k: int = 3, scale: int = 255) -> Counter[int]:
+    """Keep top-K entries and quantize counts to a compact integer scale."""
+    if not counter:
+        return Counter()
+    top = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:top_k]
+    total = sum(v for _, v in top)
+    if total <= 0:
+        return Counter()
+
+    quantized = {k: max(1, int(round((v / total) * scale))) for k, v in top}
+    qsum = sum(quantized.values())
+    if qsum != scale:
+        # Adjust the largest bucket to preserve target mass exactly.
+        largest_key = max(quantized, key=quantized.get)
+        quantized[largest_key] = max(1, quantized[largest_key] + (scale - qsum))
+    return Counter(quantized)
+
+
+def _compact_context_model(
+    model: ContextMixingModel,
+    top_k: int = 3,
+    scale: int = 255,
+) -> ContextMixingModel:
+    """Apply compact top-K quantization to model context maps in-place."""
+    model.char_context = defaultdict(
+        Counter,
+        {k: _quantize_counter(v, top_k=top_k, scale=scale) for k, v in model.char_context.items()},
+    )
+    model.morph_context = defaultdict(
+        Counter,
+        {k: _quantize_counter(v, top_k=top_k, scale=scale) for k, v in model.morph_context.items()},
+    )
+    model.struct_context = defaultdict(
+        Counter,
+        {k: _quantize_counter(v, top_k=top_k, scale=scale) for k, v in model.struct_context.items()},
+    )
+    # Rebuild vocabs from compacted maps.
+    symbols = set()
+    for d in (model.char_context, model.morph_context, model.struct_context):
+        for c in d.values():
+            symbols.update(c.keys())
+    model.char_vocab = sorted(int(s) for s in symbols)
+    return model
 
 def _get_nlp(model: str | None = None):
     model_name = model or SPACY_MODEL
@@ -417,7 +460,12 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
     return payload
 
 
-def compress_to_file(text: str, output_path: str, model: str | None = None) -> Dict:
+def compress_to_file(
+    text: str,
+    output_path: str,
+    model: str | None = None,
+    compact_context_mode: bool = False,
+) -> Dict:
     """
     Full compression pipeline with arithmetic coding.
 
@@ -444,6 +492,8 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
 
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
+    if compact_context_mode:
+        _compact_context_model(context_model, top_k=3, scale=255)
 
     char_classes:          List[int]        = []
     char_pos_deltas:       List[int]        = []
@@ -511,16 +561,20 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
 
     # --- encode with the new LEXI binary envelope (replaces msgpack) ---
     binary = encode_metadata(metadata)
-    Path(output_path).write_bytes(binary)
+    wrapped_binary, zstd_wrapped = _maybe_wrap_zstd(binary)
+    Path(output_path).write_bytes(wrapped_binary)
 
     original_size   = len(text.encode("utf-8"))
     compressed_size = len(compressed_bytes)
     return {
         "original_size":          original_size,
         "compressed_size":        compressed_size,
+        "payload_size":           len(wrapped_binary),
         "compression_ratio":      compressed_size / original_size if original_size else 0.0,
         "bpb":                    (compressed_size * 8) / original_size if original_size else 0.0,
         "discourse_symbols":      len(symbol_table),
+        "zstd_wrapped":           zstd_wrapped,
+        "compact_context_mode":   compact_context_mode,
         "discourse_reduction_pct": round(100 * (orig_len - disc_len) / orig_len, 2)
                                    if orig_len else 0.0,
     }
@@ -529,6 +583,7 @@ def compress_to_file(text: str, output_path: str, model: str | None = None) -> D
 def decompress(input_path: str) -> str:
     """Decompress a .lexis file.  Auto-detects LEXI envelope, msgpack, or JSON."""
     raw = Path(input_path).read_bytes()
+    raw = _maybe_unwrap_zstd(raw)
     payload: Dict[str, Any]
 
     if is_lexi_file(raw):
@@ -676,6 +731,11 @@ def main() -> None:
     compress_parser.add_argument("input",  help="Input text file")
     compress_parser.add_argument("output", help="Output binary file")
     compress_parser.add_argument("--model", default=None, help="spaCy model to use.")
+    compress_parser.add_argument(
+        "--compact-context",
+        action="store_true",
+        help="Enable compact top-K quantized context maps for smaller metadata.",
+    )
 
     decompress_parser = subparsers.add_parser("decompress", help="Decompress archive")
     decompress_parser.add_argument("input", help="Input binary file")
@@ -688,7 +748,12 @@ def main() -> None:
 
     if args.command == "compress":
         text = _read_text(args.input)
-        compress_to_file(text, args.output, model=args.model)
+        compress_to_file(
+            text,
+            args.output,
+            model=args.model,
+            compact_context_mode=bool(args.compact_context),
+        )
         print(f"Wrote LEXI archive to {args.output}")
     elif args.command == "decompress":
         reconstructed = decompress(args.input)

@@ -53,6 +53,7 @@ def run_scaling_test(
     input_path: str,
     sizes: list[int],
     model: str | None = None,
+    compact_context_mode: bool = False,
 ) -> list[dict[str, float | int | bool]]:
     source_text = Path(input_path).read_text(encoding="utf-8")
     rows: list[dict[str, float | int | bool]] = []
@@ -65,7 +66,12 @@ def run_scaling_test(
             norm_bytes = len(normalized.encode("utf-8")) or 1
 
             lexi_path = tmp / f"sample_{size}.lexi"
-            stats = compress_to_file(raw_slice, str(lexi_path), model=model)
+            stats = compress_to_file(
+                raw_slice,
+                str(lexi_path),
+                model=model,
+                compact_context_mode=compact_context_mode,
+            )
             decoded = decompress(str(lexi_path))
 
             raw_payload = _maybe_unwrap_zstd(lexi_path.read_bytes())
@@ -133,10 +139,20 @@ def main() -> None:
         default=[500, 1000, 2500, 5000, 10_000, 25_000, 50_000, 100_000],
     )
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--compact-context",
+        action="store_true",
+        help="Enable compact top-K quantized context maps during compression.",
+    )
     parser.add_argument("--csv", default=None, help="Optional CSV output path")
     args = parser.parse_args()
 
-    rows = run_scaling_test(args.input, args.sizes, model=args.model)
+    rows = run_scaling_test(
+        args.input,
+        args.sizes,
+        model=args.model,
+        compact_context_mode=bool(args.compact_context),
+    )
 
     print(
         "chars | norm_chars | exact | char_stream_bpb | full_payload_bpb | "
@@ -166,4 +182,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
