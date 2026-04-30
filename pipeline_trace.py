@@ -1414,7 +1414,7 @@ print(SEP)
 print("STAGE 11 — full compress_to_file → decompress end-to-end")
 print(SEP)
 
-from main import compress_to_file, decompress
+from main import compress_to_file, decompress, _maybe_unwrap_zstd
 
 with tempfile.NamedTemporaryFile(suffix=".lexis", delete=False) as tf:
     tmp_path = tf.name
@@ -1428,8 +1428,12 @@ try:
           Path(tmp_path).exists() and Path(tmp_path).stat().st_size > 0,
           got=Path(tmp_path).stat().st_size if Path(tmp_path).exists() else 0,
           expected="> 0")
+
+    # Unwrap zstd (LXZ1) before LEXI magic check — compress_to_file may
+    # apply zstd when it reduces the payload size.
+    _raw_lexi = _maybe_unwrap_zstd(Path(tmp_path).read_bytes())
     label("is_lexi_file accepts written output",
-          is_lexi_file(Path(tmp_path).read_bytes()), got=False, expected=True)
+          is_lexi_file(_raw_lexi), got=False, expected=True)
 
     for stat_key in ["original_size", "compressed_size", "compression_ratio", "bpb"]:
         label(f"stats has key '{stat_key}'",
@@ -1444,7 +1448,6 @@ try:
           expected="original > compressed")
 
     # Verify case_flags and case_bitmaps are persisted in the written file
-    _raw_lexi = Path(tmp_path).read_bytes()
     _meta_check = decode_metadata(_raw_lexi)
     label("written LEXI file contains case_flags field",
           "case_flags" in _meta_check and len(_meta_check["case_flags"]) > 0,
