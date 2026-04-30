@@ -2,7 +2,7 @@
 
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
-Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, full pipeline), and **2.7555 bpb char-stream at 100k chars** with the `compact_mode` default profile (`k6s511`), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure — no learned weights, no training corpus.
+Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, full pipeline), and **2.7523 bpb char-stream at 100k chars** with the `compact_mode` default profile (`k6s511`), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure — no learned weights, no training corpus.
 
 > *"How much of the compressibility of English comes from its linguistic structure alone, versus from statistical regularities in training data?"*
 >
@@ -25,20 +25,24 @@ Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, full 
 
 *Best single document: **2.6805 bpb** (10k chars, 17 discourse symbols).*
 
-### Lexis-E — Scaling Test (Moby Dick, compact_mode k6s511 default profile)
+### Lexis-E — Scaling Test on FineWeb (compact_mode, both profiles)
 
-| Input chars | char_stream_bpb | full_payload_bpb | char_stream bytes | full_payload bytes |
-|---|---|---|---|---|
-| 10,000 | 2.7919 | 12.6728 | 3,411 | 15,483 |
-| 25,000 | 2.7808 | 12.2991 | 8,535 | 37,749 |
-| 50,000 | 2.7724 | 11.5677 | 17,176 | 71,666 |
-| **100,000** | **2.7555** | **11.0172** | **34,323** | **137,230** |
+| Profile | Input chars | char_stream_bpb | full_payload_bpb | char_stream bytes | full_payload bytes |
+|---|---|---|---|---|---|
+| default (k6s511) | 10,000 | 2.7807 | 12.1866 | 3,479 | 15,247 |
+| default (k6s511) | 25,000 | 2.7774 | 11.4323 | 8,686 | 35,753 |
+| default (k6s511) | 50,000 | 2.7671 | 11.1774 | 17,304 | 69,898 |
+| **default (k6s511)** | **100,000** | **2.7523** | **11.1048** | **34,433** | **138,926** |
+| aggressive (k6s127) | 10,000 | 2.7927 | 12.0028 | 3,494 | 15,017 |
+| aggressive (k6s127) | 25,000 | 2.7860 | 11.4278 | 8,713 | 35,739 |
+| aggressive (k6s127) | 50,000 | 2.7767 | 11.1739 | 17,364 | 69,876 |
+| aggressive (k6s127) | 100,000 | 2.7644 | 11.0597 | 34,584 | 138,362 |
 
-*char_stream_bpb measures the arithmetic-coded character stream only. full_payload_bpb includes all metadata (morph codes, POS tags, case flags, model weights, symbol table, root lengths, etc.).*
+*Wall-clock time for both profiles × 4 sizes: **8m 56s** real (13m 31s user — CPU-parallel stages). char_stream_bpb measures the arithmetic-coded character stream only. full_payload_bpb includes all metadata (morph codes, POS tags, case flags, model weights, symbol table, root lengths, etc.).*
 
 ---
 
-## compact_mode — Profile Sweep
+## compact_mode — Profile Sweep (Moby Dick corpus)
 
 Lexis-E exposes a `compact_mode` flag that sweeps the context-mixing model's `top_k` (number of active prediction contexts) and `scale` (probability sharpening factor). A full grid sweep was run at 10k / 25k / 50k / 100k chars across k∈{3,4,5,6} × scale∈{127,255,511,1023}.
 
@@ -65,11 +69,11 @@ Lexis-E exposes a `compact_mode` flag that sweeps the context-mixing model's `to
 
 ### Why k6s511 is the default
 
-k6s511 achieves the **lowest char_stream_bpb (2.7555)** and the **smallest char_stream byte count (34,323)** at 100k chars across all 16 profiles. While k6s1023 is marginally comparable (2.7563 bpb, 34,333 bytes), it uses a larger scale window with no net benefit at any tested size. k6s127 (`aggressive` profile) reaches 2.7719 bpb but has a larger char_stream footprint (34,527 bytes) despite the tighter scale. k6s511 thus hits the optimal point on the `top_k` × `scale` Pareto frontier.
+k6s511 achieves the **lowest char_stream_bpb (2.7555)** and the **smallest char_stream byte count (34,323)** at 100k chars across all 16 profiles on the Moby Dick sweep corpus, and confirms **2.7523 bpb on FineWeb** at 100k chars. While k6s1023 is marginally comparable (2.7563 bpb), it uses a larger scale window with no net benefit at any tested size. k6s127 (`aggressive` profile) scores better on full_payload_bpb at 100k on FineWeb (11.0597 vs 11.1048) but has worse char_stream_bpb (2.7644 vs 2.7523), making k6s511 the Pareto-optimal default for char-stream compression quality.
 
 Two profiles are shipped:
-- **`default`** — `top_k=6, scale=511` — best char_stream_bpb at 100k, lowest byte count
-- **`aggressive`** — `top_k=6, scale=127` — best full_payload_bpb at 100k (11.014), preferred when metadata overhead dominates
+- **`default`** — `top_k=6, scale=511` — best char_stream_bpb, lowest char_stream byte count
+- **`aggressive`** — `top_k=6, scale=127` — best full_payload_bpb (metadata overhead dominant use case)
 
 ---
 
@@ -152,7 +156,7 @@ pip install cupy-cuda12x  # only if CUDA is available
 
 # Verify installation
 pip check
-python pipeline_trace.py  # all stages should be green
+python pipeline_trace.py  # all stages green
 ```
 
 ---
@@ -169,11 +173,13 @@ python test_round_trip_pipeline.py
 # FineWeb benchmark
 python eval_fineweb_bpb.py
 
-# Scale test up to 100k chars
-python scaling_test.py --chars 100000 --profile default
-
-# compact_mode sweep (reproduce Table above)
-python scaling_test.py --sweep
+# Scale test (FineWeb, both profiles)
+time python scaling_test.py \
+  --input fineweb_100k.txt \
+  --sizes 10000 25000 50000 100000 \
+  --compact-context \
+  --compact-profile both \
+  --csv fineweb_sweep_both_profiles.csv
 ```
 
 ---
@@ -203,8 +209,8 @@ This tag marks the exact codebase submitted to the [OpenAI Parameter Golf Challe
 
 ## Test Corpus
 
-- **Moby Dick** (Project Gutenberg) — round-trip validated and scaling-tested at 10k, 25k, 50k, 100k chars (Lexis-E compact_mode)
-- **FineWeb** (HuggingFaceFW/fineweb, sample-10BT) — 50 samples × 10k chars, benchmarked (Lexis-E full pipeline)
+- **Moby Dick** (Project Gutenberg) — compact_mode profile sweep, 10k–100k chars (16 profiles, 4 sizes each)
+- **FineWeb** (HuggingFaceFW/fineweb, sample-10BT) — full pipeline: 50 samples × 10k chars; compact_mode scaling: both profiles × 4 sizes up to 100k chars
 
 ---
 
