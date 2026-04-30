@@ -138,6 +138,40 @@ def run_scaling_test(
     return rows
 
 
+def run_profiled_scaling_tests(
+    input_path: str,
+    sizes: list[int],
+    model: str | None = None,
+    profile: str = "default",
+    compact_context_mode: bool = False,
+    compact_context_top_k: int | None = None,
+    compact_context_scale: int | None = None,
+) -> list[dict[str, float | int | bool | str]]:
+    """Run scaling tests for one profile or both preset profiles."""
+    profiles = [profile] if profile != "both" else ["default", "aggressive"]
+    all_rows: list[dict[str, float | int | bool | str]] = []
+
+    for prof in profiles:
+        preset_top_k, preset_scale = _COMPACT_CONTEXT_PRESETS[str(prof)]
+        top_k = int(compact_context_top_k) if compact_context_top_k is not None else preset_top_k
+        scale = int(compact_context_scale) if compact_context_scale is not None else preset_scale
+        rows = run_scaling_test(
+            input_path=input_path,
+            sizes=sizes,
+            model=model,
+            compact_context_mode=compact_context_mode,
+            compact_context_top_k=top_k,
+            compact_context_scale=scale,
+        )
+        for row in rows:
+            row = dict(row)
+            row["compact_profile"] = prof
+            row["compact_top_k"] = top_k
+            row["compact_scale"] = scale
+            all_rows.append(row)
+    return all_rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lexis scaling test runner")
     parser.add_argument("--input", default="moby_dick.txt")
@@ -155,7 +189,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--compact-profile",
-        choices=sorted(_COMPACT_CONTEXT_PRESETS.keys()),
+        choices=sorted(_COMPACT_CONTEXT_PRESETS.keys()) + ["both"],
         default="default",
     )
     parser.add_argument("--compact-top-k", type=int, default=None)
@@ -163,28 +197,24 @@ def main() -> None:
     parser.add_argument("--csv", default=None, help="Optional CSV output path")
     args = parser.parse_args()
 
-    preset_top_k, preset_scale = _COMPACT_CONTEXT_PRESETS[str(args.compact_profile)]
-    top_k = int(args.compact_top_k) if args.compact_top_k is not None else preset_top_k
-    scale = int(args.compact_scale) if args.compact_scale is not None else preset_scale
-
-
-    rows = run_scaling_test(
+    rows = run_profiled_scaling_tests(
         args.input,
         args.sizes,
         model=args.model,
+        profile=str(args.compact_profile),
         compact_context_mode=bool(args.compact_context),
-        compact_context_top_k=top_k,
-        compact_context_scale=scale,
+        compact_context_top_k=args.compact_top_k,
+        compact_context_scale=args.compact_scale,
     )
 
     print(
-        "chars | norm_chars | exact | char_stream_bpb | full_payload_bpb | "
+        "profile | chars | norm_chars | exact | char_stream_bpb | full_payload_bpb | "
         "word_pos | word_bag | char_seq | first_diff | roots/morph | aligned | "
         "char_bytes | payload_bytes"
     )
     for r in rows:
         print(
-            f"{r['chars']:>5} | {r['normalized_chars']:>10} | "
+            f"{r['compact_profile']:>9} | {r['chars']:>5} | {r['normalized_chars']:>10} | "
             f"{str(r['exact_match']):>5} | {r['char_stream_bpb']:>15} | "
             f"{r['full_payload_bpb']:>16} | {r['word_overlap_positional']:>8} | "
             f"{r['word_overlap_bag']:>8} | {r['char_seq_ratio']:>8} | "
