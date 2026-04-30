@@ -1,0 +1,9 @@
+chars,normalized_chars,exact_match,char_stream_bpb,full_payload_bpb,word_overlap_positional,word_overlap_bag,char_seq_ratio,first_diff_idx,roots_count,morph_tokens,root_morph_aligned,char_stream_bytes,full_payload_bytes,compact_profile,compact_top_k,compact_scale
+10000,10007,False,2.7807,12.1866,0.0438,0.9307,0.9768,66,1989,1989,True,3479,15247,default,6,511
+25000,25007,False,2.7774,11.4323,0.0237,0.9386,0.9795,66,4861,4861,True,8686,35753,default,6,511
+50000,50009,False,2.7671,11.1774,0.0152,0.9521,0.959,66,9547,9547,True,17304,69898,default,6,511
+100000,100011,False,2.7523,11.1048,0.0102,0.8911,0.9423,66,19997,19997,True,34433,138926,default,6,511
+10000,10007,False,2.7927,12.0028,0.0438,0.9307,0.9768,66,1989,1989,True,3494,15017,aggressive,6,127
+25000,25007,False,2.786,11.4278,0.0237,0.9386,0.9795,66,4861,4861,True,8713,35739,aggressive,6,127
+50000,50009,False,2.7767,11.1739,0.0152,0.9521,0.959,66,9547,9547,True,17364,69876,aggressive,6,127
+100000,100011,False,2.7644,11.0597,0.0102,0.8911,0.9423,66,19997,19997,True,34584,138362,aggressive,6,127
