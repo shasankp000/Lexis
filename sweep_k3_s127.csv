@@ -1,0 +1,5 @@
+chars,normalized_chars,exact_match,char_stream_bpb,full_payload_bpb,word_overlap_positional,word_overlap_bag,char_seq_ratio,first_diff_idx,roots_count,morph_tokens,root_morph_aligned,char_stream_bytes,full_payload_bytes
+10000,9762,False,3.1782,13.0108,0.6422,0.9426,0.9624,55,2169,2169,True,3883,15896
+25000,24542,False,3.2272,12.6712,0.2533,0.8963,0.6617,55,5387,5387,True,9905,38891
+50000,49551,False,3.2006,12.0798,0.126,0.9361,0.9197,55,10663,10663,True,19829,74839
+100000,99636,False,3.1928,12.1146,0.0662,0.9506,0.8281,55,21491,21491,True,39769,150900
