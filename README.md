@@ -102,7 +102,8 @@ Raw Text
 [Stage 6]  Probability Modeling   -- 3-level online context-mixing model (no prior training)
               ↳ compact_mode: configurable top_k × scale sweep
    ↓
-[Stage 7]  rANS Encoding          -- arithmetic coding on probability-weighted symbol stream
+[Stage 7]  Arithmetic Encoding    -- interval arithmetic coding on probability-weighted symbol stream
+                                     (NOTE: this is standard arithmetic coding, NOT rANS)
    ↓
 [Stage 8]  Decoding               -- full reverse pipeline, semantic fidelity preserved
 ```
@@ -202,7 +203,7 @@ This tag marks the exact codebase submitted to the [OpenAI Parameter Golf Challe
 
 - **Semantic fidelity over byte-exact reconstruction** -- Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
 - **IDE import warnings** -- your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if not launched from inside the virtual environment. This is a false positive.
-- **GPU usage** -- Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 rANS encoding runs on CPU.
+- **GPU usage** -- Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 arithmetic encoding runs on CPU (standard interval arithmetic coding, not rANS).
 - **transformers version patch** -- `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`.
 
 ---
