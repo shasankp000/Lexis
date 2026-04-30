@@ -189,10 +189,10 @@ time python scaling_test.py \
 The canonical submission state is tagged at:
 
 ```
-git tag challenge-submit-2026-04-30
+git tag challenge-submit-updated-2026-04-30
 ```
 
-Commit: [`2c37fad`](https://github.com/shasankp000/Lexis/commit/2c37fad43977a17c800856d95e552b46c2656281) -- *Merge: compact_mode dual-profile support + field-level CSV reporting*
+Commit: [`8ecacb34`](https://github.com/shasankp000/Lexis/commit/8ecacb45f0e1577061eff224269838a3fff758dd) -- *docs: clarify Stage 7 is standard arithmetic coding, not rANS*
 
 This tag marks the exact codebase submitted to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) non-record track on 2026-04-30.
 
