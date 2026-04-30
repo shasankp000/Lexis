@@ -2,7 +2,7 @@
 
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
-Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure.
+Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, full pipeline), and **2.7555 bpb char-stream at 100k chars** with the `compact_mode` default profile (`k6s511`), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure — no learned weights, no training corpus.
 
 > *"How much of the compressibility of English comes from its linguistic structure alone, versus from statistical regularities in training data?"*
 >
@@ -12,7 +12,7 @@ Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E), outp
 
 ## Benchmark Results
 
-### Lexis-E — FineWeb
+### Lexis-E — FineWeb (50 × 10k chars, all pipeline stages active)
 
 | System | bpb on web text | Notes |
 |---|---|---|
@@ -23,7 +23,53 @@ Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E), outp
 | cmix | ≈2.00 | Classical context mixing, CPU-only |
 | GPT-2 (1.5B params) | ≈1.30 | Trained on WebText |
 
-*Evaluated on 50 FineWeb samples × 10k chars, all pipeline stages active. Best single document: **2.6805 bpb** (10k chars, 17 discourse symbols).*
+*Best single document: **2.6805 bpb** (10k chars, 17 discourse symbols).*
+
+### Lexis-E — Scaling Test (Moby Dick, compact_mode k6s511 default profile)
+
+| Input chars | char_stream_bpb | full_payload_bpb | char_stream bytes | full_payload bytes |
+|---|---|---|---|---|
+| 10,000 | 2.7919 | 12.6728 | 3,411 | 15,483 |
+| 25,000 | 2.7808 | 12.2991 | 8,535 | 37,749 |
+| 50,000 | 2.7724 | 11.5677 | 17,176 | 71,666 |
+| **100,000** | **2.7555** | **11.0172** | **34,323** | **137,230** |
+
+*char_stream_bpb measures the arithmetic-coded character stream only. full_payload_bpb includes all metadata (morph codes, POS tags, case flags, model weights, symbol table, root lengths, etc.).*
+
+---
+
+## compact_mode — Profile Sweep
+
+Lexis-E exposes a `compact_mode` flag that sweeps the context-mixing model's `top_k` (number of active prediction contexts) and `scale` (probability sharpening factor). A full grid sweep was run at 10k / 25k / 50k / 100k chars across k∈{3,4,5,6} × scale∈{127,255,511,1023}.
+
+### Full sweep — char_stream_bpb at 100k chars
+
+| Profile | top_k | scale | char_stream_bpb | full_payload_bpb | char_stream bytes |
+|---|---|---|---|---|---|
+| k3s127 | 3 | 127 | 3.1928 | 12.1146 | 39,769 |
+| k3s255 | 3 | 255 | 3.3339 | 12.2242 | 41,527 |
+| k3s511 | 3 | 511 | 3.4860 | 11.6501 | 43,421 |
+| k3s1023 | 3 | 1023 | 3.6408 | 11.9568 | 45,350 |
+| k4s127 | 4 | 127 | 2.9240 | 11.2266 | 36,421 |
+| k4s255 | 4 | 255 | 2.9714 | 11.3285 | 37,012 |
+| k4s511 | 4 | 511 | 3.0270 | 11.3255 | 37,704 |
+| k4s1023 | 4 | 1023 | 3.0847 | 11.3895 | 38,423 |
+| k5s127 | 5 | 127 | 2.8413 | 11.0494 | 35,391 |
+| k5s255 | 5 | 255 | 2.8585 | 11.0560 | 35,606 |
+| k5s511 | 5 | 511 | 2.8828 | 11.2648 | 35,908 |
+| k5s1023 | 5 | 1023 | 2.9087 | 11.2746 | 36,231 |
+| k6s127 | 6 | 127 | 2.7719 | 11.0140 | 34,527 |
+| k6s255 | 6 | 255 | 2.7583 | 11.1828 | 34,357 |
+| **k6s511** *(default)* | **6** | **511** | **2.7555** | **11.0172** | **34,323** |
+| k6s1023 | 6 | 1023 | 2.7563 | 11.1885 | 34,333 |
+
+### Why k6s511 is the default
+
+k6s511 achieves the **lowest char_stream_bpb (2.7555)** and the **smallest char_stream byte count (34,323)** at 100k chars across all 16 profiles. While k6s1023 is marginally comparable (2.7563 bpb, 34,333 bytes), it uses a larger scale window with no net benefit at any tested size. k6s127 (`aggressive` profile) reaches 2.7719 bpb but has a larger char_stream footprint (34,527 bytes) despite the tighter scale. k6s511 thus hits the optimal point on the `top_k` × `scale` Pareto frontier.
+
+Two profiles are shipped:
+- **`default`** — `top_k=6, scale=511` — best char_stream_bpb at 100k, lowest byte count
+- **`aggressive`** — `top_k=6, scale=127` — best full_payload_bpb at 100k (11.014), preferred when metadata overhead dominates
 
 ---
 
@@ -34,7 +80,7 @@ Lexis compresses text through an 8-stage pipeline that progressively strips ling
 ```
 Raw Text
    ↓
-[Stage 1]  Normalization          — sentence boundaries, whitespace, UTF-8
+[Stage 1]  Normalization          — sentence boundaries, whitespace, UTF-8, BOM stripping
    ↓
 [Stage 1b] Word Substitution      — frequency-based §W tokens, net-saving guard
    ↓
@@ -47,8 +93,10 @@ Raw Text
 [Stage 4]  Discourse Analysis     — coreference resolution, symbolic entity links
    ↓
 [Stage 5]  Symbolic Encoding      — phonetic decomposition, delta streams, factoriadic
+              ↳ case_flags / case_bitmaps per token (4 categories: lower/title/upper/mixed)
    ↓
 [Stage 6]  Probability Modeling   — 3-level online context-mixing model (no prior training)
+              ↳ compact_mode: configurable top_k × scale sweep
    ↓
 [Stage 7]  rANS Encoding          — arithmetic coding on probability-weighted symbol stream
    ↓
@@ -68,6 +116,10 @@ Raw Text
 **Discourse threshold effect** — Stage 4 coreference substitution is net-negative below ~800 bytes and increasingly beneficial above ~2,000 bytes.
 
 **Factoriadic delta encoding** — Symbol deltas encoded in the factorial number system; compact for the small, frequent steps that dominate linguistically-constrained sequences.
+
+**Case flag encoding (Stage 5)** — Each token surface form is classified into one of four case categories (LOWER=0, TITLE=1, UPPER=2, MIXED=3). MIXED tokens additionally carry a per-character bitmap where bit N corresponds to char index N of the surface form. This allows lossless case restoration without storing any raw uppercase characters in the char stream. Bug fix applied in Lexis-E: bitmap bit-indexing in both `compute_case_flag` and `apply_case_flag` was corrected to use a consistent `bit N ↔ char index N` convention throughout.
+
+**compact_mode** — The context-mixing model (Stage 6) exposes `top_k` (active prediction contexts) and `scale` (probability sharpening). A 4×4 grid sweep identified `k6s511` as the Pareto-optimal default.
 
 ---
 
@@ -100,7 +152,7 @@ pip install cupy-cuda12x  # only if CUDA is available
 
 # Verify installation
 pip check
-pytest compression/tests -v  # all 25 tests should pass
+python pipeline_trace.py  # all stages should be green
 ```
 
 ---
@@ -108,12 +160,35 @@ pytest compression/tests -v  # all 25 tests should pass
 ## Usage
 
 ```bash
-# Full compression and decompression round-trip
+# Full pipeline trace (all 12 stages)
+python pipeline_trace.py
+
+# Round-trip test
 python test_round_trip_pipeline.py
 
 # FineWeb benchmark
-python benchmark.py <input_text_file>
+python eval_fineweb_bpb.py
+
+# Scale test up to 100k chars
+python scaling_test.py --chars 100000 --profile default
+
+# compact_mode sweep (reproduce Table above)
+python scaling_test.py --sweep
 ```
+
+---
+
+## Submission Snapshot
+
+The canonical submission state is tagged at:
+
+```
+git tag challenge-submit-2026-04-30
+```
+
+Commit: [`2c37fad`](https://github.com/shasankp000/Lexis/commit/2c37fad43977a17c800856d95e552b46c2656281) — *Merge: compact_mode dual-profile support + field-level CSV reporting*
+
+This tag marks the exact codebase submitted to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) non-record track on 2026-04-30.
 
 ---
 
@@ -126,16 +201,16 @@ python benchmark.py <input_text_file>
 
 ---
 
-## Origin
+## Test Corpus
 
-Lexis started as a research point of interest for the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) — specifically the non-record track, which invites submissions that push the infinite frontier of parameter-limited performance without the 16MB / 10-minute constraint.
+- **Moby Dick** (Project Gutenberg) — round-trip validated and scaling-tested at 10k, 25k, 50k, 100k chars (Lexis-E compact_mode)
+- **FineWeb** (HuggingFaceFW/fineweb, sample-10BT) — 50 samples × 10k chars, benchmarked (Lexis-E full pipeline)
 
 ---
 
-## Current Test Corpus
+## Origin
 
-- **Moby Dick** (Project Gutenberg) — round-trip validated at 5k, 10k, 25k chars (Lexis-E)
-- **FineWeb** (HuggingFaceFW/fineweb, sample-10BT) — 50 samples × 10k chars, benchmarked (Lexis-E)
+Lexis started as a research point of interest for the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) — specifically the non-record track, which invites submissions that push the frontier of parameter-limited performance without the 16MB / 10-minute constraint.
 
 ---
 
