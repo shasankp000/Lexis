@@ -39,6 +39,20 @@ CASE_UPPER = 2
 CASE_MIXED = 3
 
 
+def _mixed_case_bitmap_for_surface(surface: str) -> int:
+    """Pack uppercase positions using direct char-index mapping.
+
+    For example:
+      eBook  -> bit 1 set (0b10)
+      iPhone -> bit 1 set (0b10)
+    """
+    bitmap = 0
+    for idx, ch in enumerate(surface):
+        if ch.isupper():
+            bitmap |= (1 << idx)
+    return bitmap
+
+
 def compute_case_flag(surface: str) -> Tuple[int, int]:
     """Return (flag, bitmap) for a single token surface form.
 
@@ -47,6 +61,8 @@ def compute_case_flag(surface: str) -> Tuple[int, int]:
     """
     if not surface:
         return CASE_LOWER, 0
+    if not any(ch.isalpha() for ch in surface):
+        return CASE_LOWER, 0
     if surface.islower():
         return CASE_LOWER, 0
     if surface.isupper():
@@ -54,11 +70,7 @@ def compute_case_flag(surface: str) -> Tuple[int, int]:
     if surface[0].isupper() and surface[1:].islower():
         return CASE_TITLE, 0
     # mixed — pack a per-char bitmap: bit N = char index N
-    bitmap = 0
-    for i, ch in enumerate(surface):
-        if ch.isupper():
-            bitmap |= (1 << i)
-    return CASE_MIXED, bitmap
+    return CASE_MIXED, _mixed_case_bitmap_for_surface(surface)
 
 
 def apply_case_flag(word: str, flag: int, bitmap: int = 0) -> str:
@@ -73,9 +85,9 @@ def apply_case_flag(word: str, flag: int, bitmap: int = 0) -> str:
         return word.upper()
     # CASE_MIXED — bit N of bitmap corresponds to char index N
     chars = list(word.lower())
-    for i in range(len(chars)):
-        if bitmap & (1 << i):
-            chars[i] = chars[i].upper()
+    for idx in range(len(chars)):
+        if bitmap & (1 << idx):
+            chars[idx] = chars[idx].upper()
     return "".join(chars)
 
 
