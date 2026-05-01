@@ -2,7 +2,7 @@
 
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
-Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, full pipeline), and **2.7523 bpb char-stream at 100k chars** with the `compact_mode` default profile (`k6s511`), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure -- no learned weights, no training corpus.
+Lexis (main) achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, full pipeline), and **2.7523 bpb char-stream at 100k chars** with the `compact_mode` default profile (`k6s511`), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure -- no learned weights, no training corpus.
 
 > *"How much of the compressibility of English comes from its linguistic structure alone, versus from statistical regularities in training data?"*
 >
@@ -12,9 +12,9 @@ Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, full 
 
 ## Benchmark Results
 
-### Lexis-E -- FineWeb (50 × 10k chars, all pipeline stages active)
+### Lexis (main branch) -- FineWeb (50 × 10k chars, all pipeline stages active)
 
-| System | bpb on web text | Notes |
+| System | bpb (char stream) on web text | Notes |
 |---|---|---|
 | Uncompressed UTF-8 | 8.00 | Baseline |
 | gzip level 9 | ≈3.50 | General-purpose |
