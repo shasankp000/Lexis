@@ -161,15 +161,15 @@ python eval_fineweb_bpb.py --samples 50 --chars 10000 --seed 42 --out results_fi
 
 ## Submission Snapshot
 
-The canonical submission state is tagged at:
+The canonical Lexis(main) submission state is tagged at:
 
 ```
-git tag challenge-submit-updated-2026-04-30
+git tag challenge-submit-updated-docs-main-2026-05-01 
 ```
 
-Commit: [`8ecacb45`](https://github.com/shasankp000/Lexis/commit/8ecacb45f0e1577061eff224269838a3fff758dd) -- *docs: clarify Stage 7 is standard arithmetic coding, not rANS*
+Commit: [`bc3582a`](https://github.com/shasankp000/Lexis/commit/bc3582ad752c3c9a36be20826e20dde0dba80c5a) -- *docs: add Lexis-E (Efficient) origin section explaining branch split and differences vs main* (same commit name, but on main branch)
 
-This tag marks the exact codebase submitted to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) non-record track on 2026-04-30.
+This tag marks the exact Lexis(main) codebase not directly submitted to the OpenAI Parameter Golf Challenge, but the main branch of the Lexis repository that can be accessed. Last updated on 2026-05-01
 
 ---
 
