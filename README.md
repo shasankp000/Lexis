@@ -2,7 +2,7 @@
 
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
-Lexis (main) achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, full pipeline), and **2.7523 bpb char-stream at 100k chars** with the `compact_mode` default profile (`k6s511`), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure -- no learned weights, no training corpus.
+Lexis (main) achieves **2.7494 bpb char-stream on FineWeb with zero training data** (50 samples, pooled bytes), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure -- no learned weights, no training corpus.
 
 > *"How much of the compressibility of English comes from its linguistic structure alone, versus from statistical regularities in training data?"*
 >
@@ -12,68 +12,26 @@ Lexis (main) achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E
 
 ## Benchmark Results
 
-### Lexis (main branch) -- FineWeb (50 × 10k chars, all pipeline stages active)
+### Lexis (main branch) -- FineWeb (50 samples ×≤10k chars, all pipeline stages active)
 
-| System | bpb (char stream) on web text | Notes |
-|---|---|---|
-| Uncompressed UTF-8 | 8.00 | Baseline |
-| gzip level 9 | ≈3.50 | General-purpose |
-| zstd level 19 | ≈3.00 | General-purpose |
-| **Lexis-E (no training data)** | **2.7494** | All stages active |
-| cmix | ≈2.00 | Classical context mixing, CPU-only |
-| GPT-2 (1.5B params) | ≈1.30 | Trained on WebText |
+| System | bpb (char-stream) | bpb (full payload) | Notes |
+|---|---|---|---|
+| Uncompressed UTF-8 | 8.00 | 8.00 | Baseline |
+| gzip level 9 | ≈3.50 | ≈3.50 | General-purpose |
+| zstd level 19 | ≈3.00 | ≈3.00 | General-purpose |
+| **Lexis main (no training data)** | **2.7494** | **23.384** | 50 samples, pooled bytes |
+| cmix | ≈2.00 | ≈2.00 | Classical context mixing, CPU-only |
+| GPT-2 (1.5B params) | ≈1.30 | ≈1.30 | Trained on WebText |
 
-*Best single document: **2.6805 bpb** (10k chars, 17 discourse symbols).*
+*char-stream bpb = arithmetic-coded character bitstream only. full-payload bpb = complete .lexis file including all metadata (POS tags, morph codes, model state, symbol table, etc.). Scores measured via `eval_fineweb_bpb.py --samples 50 --chars 10000 --seed 42`.*
 
-### Lexis-E -- Scaling Test on FineWeb (compact_mode, both profiles)
+### Lexis (main branch) -- Moby Dick scaling test
 
-| Profile | Input chars | char_stream_bpb | full_payload_bpb | char_stream bytes | full_payload bytes |
-|---|---|---|---|---|---|
-| default (k6s511) | 10,000 | 2.7807 | 12.1866 | 3,479 | 15,247 |
-| default (k6s511) | 25,000 | 2.7774 | 11.4323 | 8,686 | 35,753 |
-| default (k6s511) | 50,000 | 2.7671 | 11.1774 | 17,304 | 69,898 |
-| **default (k6s511)** | **100,000** | **2.7523** | **11.1048** | **34,433** | **138,926** |
-| aggressive (k6s127) | 10,000 | 2.7927 | 12.0028 | 3,494 | 15,017 |
-| aggressive (k6s127) | 25,000 | 2.7860 | 11.4278 | 8,713 | 35,739 |
-| aggressive (k6s127) | 50,000 | 2.7767 | 11.1739 | 17,364 | 69,876 |
-| aggressive (k6s127) | 100,000 | 2.7644 | 11.0597 | 34,584 | 138,362 |
+| Input chars | char_stream_bpb | full_payload_bpb | char_stream bytes | full_payload bytes |
+|---|---|---|---|---|
+| **100,000** | **2.6649** | **20.8391** | 33,881 | 264,943 |
 
-*Wall-clock time for both profiles × 4 sizes: **8m 56s** real (13m 31s user -- CPU-parallel stages). char_stream_bpb measures the arithmetic-coded character stream only. full_payload_bpb includes all metadata (morph codes, POS tags, case flags, model weights, symbol table, root lengths, etc.).*
-
----
-
-## compact_mode -- Profile Sweep (Moby Dick corpus)
-
-Lexis-E exposes a `compact_mode` flag that sweeps the context-mixing model's `top_k` (number of active prediction contexts) and `scale` (probability sharpening factor). A full grid sweep was run at 10k / 25k / 50k / 100k chars across k∈{3,4,5,6} × scale∈{127,255,511,1023}.
-
-### Full sweep -- char_stream_bpb at 100k chars
-
-| Profile | top_k | scale | char_stream_bpb | full_payload_bpb | char_stream bytes |
-|---|---|---|---|---|---|
-| k3s127 | 3 | 127 | 3.1928 | 12.1146 | 39,769 |
-| k3s255 | 3 | 255 | 3.3339 | 12.2242 | 41,527 |
-| k3s511 | 3 | 511 | 3.4860 | 11.6501 | 43,421 |
-| k3s1023 | 3 | 1023 | 3.6408 | 11.9568 | 45,350 |
-| k4s127 | 4 | 127 | 2.9240 | 11.2266 | 36,421 |
-| k4s255 | 4 | 255 | 2.9714 | 11.3285 | 37,012 |
-| k4s511 | 4 | 511 | 3.0270 | 11.3255 | 37,704 |
-| k4s1023 | 4 | 1023 | 3.0847 | 11.3895 | 38,423 |
-| k5s127 | 5 | 127 | 2.8413 | 11.0494 | 35,391 |
-| k5s255 | 5 | 255 | 2.8585 | 11.0560 | 35,606 |
-| k5s511 | 5 | 511 | 2.8828 | 11.2648 | 35,908 |
-| k5s1023 | 5 | 1023 | 2.9087 | 11.2746 | 36,231 |
-| k6s127 | 6 | 127 | 2.7719 | 11.0140 | 34,527 |
-| k6s255 | 6 | 255 | 2.7583 | 11.1828 | 34,357 |
-| **k6s511** *(default)* | **6** | **511** | **2.7555** | **11.0172** | **34,323** |
-| k6s1023 | 6 | 1023 | 2.7563 | 11.1885 | 34,333 |
-
-### Why k6s511 is the default
-
-k6s511 achieves the **lowest char_stream_bpb (2.7555)** and the **smallest char_stream byte count (34,323)** at 100k chars across all 16 profiles on the Moby Dick sweep corpus, and confirms **2.7523 bpb on FineWeb** at 100k chars. While k6s1023 is marginally comparable (2.7563 bpb), it uses a larger scale window with no net benefit at any tested size. k6s127 (`aggressive` profile) scores better on full_payload_bpb at 100k on FineWeb (11.0597 vs 11.1048) but has worse char_stream_bpb (2.7644 vs 2.7523), making k6s511 the Pareto-optimal default for char-stream compression quality.
-
-Two profiles are shipped:
-- **`default`** -- `top_k=6, scale=511` -- best char_stream_bpb, lowest char_stream byte count
-- **`aggressive`** -- `top_k=6, scale=127` -- best full_payload_bpb (metadata overhead dominant use case)
+*Single-document continuous text. full_payload_bpb is high relative to Lexis-E because the main branch carries uncompressed metadata; Lexis-E introduces compact_mode which dramatically reduces metadata overhead.*
 
 ---
 
@@ -100,7 +58,6 @@ Raw Text
               ↳ case_flags / case_bitmaps per token (4 categories: lower/title/upper/mixed)
    ↓
 [Stage 6]  Probability Modeling   -- 3-level online context-mixing model (no prior training)
-              ↳ compact_mode: configurable top_k × scale sweep
    ↓
 [Stage 7]  Arithmetic Encoding    -- interval arithmetic coding on probability-weighted symbol stream
                                      (NOTE: this is standard arithmetic coding, NOT rANS)
@@ -122,9 +79,7 @@ Raw Text
 
 **Factoriadic delta encoding** -- Symbol deltas encoded in the factorial number system; compact for the small, frequent steps that dominate linguistically-constrained sequences.
 
-**Case flag encoding (Stage 5)** -- Each token surface form is classified into one of four case categories (LOWER=0, TITLE=1, UPPER=2, MIXED=3). MIXED tokens additionally carry a per-character bitmap where bit N corresponds to char index N of the surface form. This allows lossless case restoration without storing any raw uppercase characters in the char stream. Bug fix applied in Lexis-E: bitmap bit-indexing in both `compute_case_flag` and `apply_case_flag` was corrected to use a consistent `bit N ↔ char index N` convention throughout.
-
-**compact_mode** -- The context-mixing model (Stage 6) exposes `top_k` (active prediction contexts) and `scale` (probability sharpening). A 4×4 grid sweep identified `k6s511` as the Pareto-optimal default.
+**Case flag encoding (Stage 5)** -- Each token surface form is classified into one of four case categories (LOWER=0, TITLE=1, UPPER=2, MIXED=3). MIXED tokens additionally carry a per-character bitmap where bit N corresponds to char index N of the surface form. This allows lossless case restoration without storing any raw uppercase characters in the char stream.
 
 ---
 
@@ -171,16 +126,8 @@ python pipeline_trace.py
 # Round-trip test
 python test_round_trip_pipeline.py
 
-# FineWeb benchmark
-python eval_fineweb_bpb.py
-
-# Scale test (FineWeb, both profiles)
-time python scaling_test.py \
-  --input fineweb_100k.txt \
-  --sizes 10000 25000 50000 100000 \
-  --compact-context \
-  --compact-profile both \
-  --csv fineweb_sweep_both_profiles.csv
+# FineWeb benchmark (reports both char-stream and full-payload bpb)
+python eval_fineweb_bpb.py --samples 50 --chars 10000 --seed 42 --out results_fineweb_main_50x10k.json
 ```
 
 ---
@@ -193,7 +140,7 @@ The canonical submission state is tagged at:
 git tag challenge-submit-updated-2026-04-30
 ```
 
-Commit: [`8ecacb34`](https://github.com/shasankp000/Lexis/commit/8ecacb45f0e1577061eff224269838a3fff758dd) -- *docs: clarify Stage 7 is standard arithmetic coding, not rANS*
+Commit: [`8ecacb45`](https://github.com/shasankp000/Lexis/commit/8ecacb45f0e1577061eff224269838a3fff758dd) -- *docs: clarify Stage 7 is standard arithmetic coding, not rANS*
 
 This tag marks the exact codebase submitted to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) non-record track on 2026-04-30.
 
@@ -202,6 +149,7 @@ This tag marks the exact codebase submitted to the [OpenAI Parameter Golf Challe
 ## Notes
 
 - **Semantic fidelity over byte-exact reconstruction** -- Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
+- **full_payload_bpb on short docs** -- The full-payload bpb is high (20-23 bpb on FineWeb short docs) because the .lexis metadata overhead dominates at small document sizes. The char-stream bpb (2.7494) is the fair compression quality metric. Lexis-E's compact_mode reduces metadata overhead significantly.
 - **IDE import warnings** -- your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if not launched from inside the virtual environment. This is a false positive.
 - **GPU usage** -- Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 arithmetic encoding runs on CPU (standard interval arithmetic coding, not rANS).
 - **transformers version patch** -- `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`.
@@ -210,8 +158,8 @@ This tag marks the exact codebase submitted to the [OpenAI Parameter Golf Challe
 
 ## Test Corpus
 
-- **Moby Dick** (Project Gutenberg) -- compact_mode profile sweep, 10k-100k chars (16 profiles, 4 sizes each)
-- **FineWeb** (HuggingFaceFW/fineweb, sample-10BT) -- full pipeline: 50 samples × 10k chars; compact_mode scaling: both profiles × 4 sizes up to 100k chars
+- **Moby Dick** (Project Gutenberg) -- 100k chars single document
+- **FineWeb** (HuggingFaceFW/fineweb, sample-10BT) -- 50 samples × ≤10k chars, seed=42
 
 ---
 
