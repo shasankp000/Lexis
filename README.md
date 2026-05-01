@@ -215,12 +215,12 @@ time python scaling_test.py \
 The canonical Lexis-E submission state is tagged at:
 
 ```
-git tag challenge-submit-updated-2026-04-30
+git tag challenge-submit-updated-docs-2026-05-01
 ```
 
-Commit: [`8ecacb45`](https://github.com/shasankp000/Lexis/commit/8ecacb45f0e1577061eff224269838a3fff758dd) -- *docs: clarify Stage 7 is standard arithmetic coding, not rANS*
+Commit: [`49588f6`](https://github.com/shasankp000/Lexis/commit/49588f691d0e83c527a025d9c59f5ed556c16d8d) -- *docs: add Lexis-E (Efficient) origin section explaining branch split and differences vs main*
 
-This tag marks the exact Lexis-E codebase submitted to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) non-record track on 2026-04-30.
+This tag marks the exact Lexis-E codebase submitted to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf) non-record track originally created on 2026-04-30, docs updated on 2026-05-01
 
 ---
 
