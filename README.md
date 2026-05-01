@@ -12,7 +12,7 @@ Lexis achieves **2.7494 bpb on FineWeb with zero training data** (Lexis-E, full 
 
 ## Benchmark Results
 
-### Lexis-E -- FineWeb (50 × 10k chars, all pipeline stages active)
+### Lexis (main branch) -- FineWeb (50 × 10k chars, all pipeline stages active)
 
 | System | bpb on web text | Notes |
 |---|---|---|
