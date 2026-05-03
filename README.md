@@ -21,12 +21,14 @@ Lexis (main) achieves **2.7494 bpb char-stream on FineWeb with zero training dat
 | gzip level 9 | FineWeb | 3.3948 | 3.3948 | 50 samples × ≤10k chars, pooled |
 | zstd level 19 | Moby Dick | 3.1125 | 3.1125 | 100k chars; no metadata separation |
 | zstd level 19 | FineWeb | 3.1828 | 3.1828 | 50 samples × ≤10k chars, pooled |
+| xz level 9 | Moby Dick | 3.0637 | 3.0637 | 100k chars; no metadata separation |
+| xz level 9 | FineWeb | 3.1079 | 3.1079 | 50 samples × ≤10k chars, pooled |
 | **Lexis main** | **FineWeb** | **2.7494** | **23.384** | 50 samples × ≤10k chars, pooled |
 | **Lexis main** | **Moby Dick** | **2.6649** | **20.8391** | 100k chars, single document |
-| cmix | — | ≈2.00 | ≈2.00 | Classical context mixing; pending measurement |
+| cmix | enwik8 | ≈1.17 | ≈1.17 | Classical context mixing; score from Knoll 2024 (byronknoll.com/cmix.html) |
 | GPT-2 (1.5B params) | — | ≈1.30 | ≈1.30 | Trained on WebText |
 
-*char-stream bpb = arithmetic-coded character bitstream only (Lexis) or raw compressed stream (gzip/zstd/cmix -- no metadata separation). full-payload bpb = complete .lexis file including all metadata. For gzip/zstd/cmix, char-stream bpb = full-payload bpb.*
+*char-stream bpb = arithmetic-coded character bitstream only (Lexis) or raw compressed stream (gzip/zstd/xz/cmix -- no metadata separation). full-payload bpb = complete .lexis file including all metadata. For gzip/zstd/xz/cmix, char-stream bpb = full-payload bpb. cmix score is the published enwik8 figure; it is not directly comparable to the 100k-char Moby Dick / FineWeb corpora used for all other rows.*
 
 ### Lexis main vs Lexis-E -- Moby Dick & FineWeb at 100k chars
 
@@ -51,7 +53,7 @@ Lexis (main) achieves **2.7494 bpb char-stream on FineWeb with zero training dat
 |---|---|---|---|---|
 | **100,000** | **2.6649** | **20.8391** | 33,881 | 264,943 |
 
-*Single-document continuous text. full_payload_bpb is high relative to Lexis-E because the main branch carries uncompressed metadata; Lexis-E’s compact_mode dramatically reduces metadata overhead.*
+*Single-document continuous text. full_payload_bpb is high relative to Lexis-E because the main branch carries uncompressed metadata; Lexis-E's compact_mode dramatically reduces metadata overhead.*
 
 ---
 
@@ -63,7 +65,7 @@ The `lexis-e` branch is the **Efficient** evolution of Lexis, developed after th
 
 After validating the 8-stage pipeline on `main`, two problems were identified:
 
-1. **Full-payload overhead** -- The main branch’s `.lexis` file bundles uncompressed structural metadata (POS tag sequences, morphological codes, model weights, symbol tables). This drives the full-payload bpb to ~20-23 on real documents, even when the character stream compresses well to ~2.7 bpb. The char-stream bpb is the honest compression quality metric, but the full-payload figure is the true end-to-end storage ratio.
+1. **Full-payload overhead** -- The main branch's `.lexis` file bundles uncompressed structural metadata (POS tag sequences, morphological codes, model weights, symbol tables). This drives the full-payload bpb to ~20-23 on real documents, even when the character stream compresses well to ~2.7 bpb. The char-stream bpb is the honest compression quality metric, but the full-payload figure is the true end-to-end storage ratio.
 2. **Fixed context-mixing parameters** -- The Stage 6 probability model had no way to tune the trade-off between prediction depth (`top_k`) and probability sharpening (`scale`), leaving performance on the table for different document types and sizes.
 
 ### What Lexis-E adds
@@ -200,8 +202,8 @@ This tag marks the exact Lexis(main) codebase not directly submitted to the Open
 ## Notes
 
 - **Semantic fidelity over byte-exact reconstruction** -- Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
-- **full_payload_bpb on short docs** -- The full-payload bpb is high (20-23 bpb on FineWeb short docs) because the .lexis metadata overhead dominates at small document sizes. The char-stream bpb (2.7494) is the fair compression quality metric. Lexis-E’s compact_mode reduces metadata overhead significantly.
-- **cmix score pending** -- cmix is running on AMD Ryzen 9 8940HX; scores will be updated once complete.
+- **full_payload_bpb on short docs** -- The full-payload bpb is high (20-23 bpb on FineWeb short docs) because the .lexis metadata overhead dominates at small document sizes. The char-stream bpb (2.7494) is the fair compression quality metric. Lexis-E's compact_mode reduces metadata overhead significantly.
+- **cmix score** -- The cmix row uses the published enwik8 bpb (≈1.17) from Byron Knoll's cmix page ([byronknoll.com/cmix.html](https://www.byronknoll.com/cmix.html)). cmix requires ~32 GB RAM to run locally; the published figure is cited rather than measured. Note the enwik8 corpus differs from Moby Dick / FineWeb, so this row is for reference context only.
 - **IDE import warnings** -- your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if not launched from inside the virtual environment. This is a false positive.
 - **GPU usage** -- Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 arithmetic encoding runs on CPU (standard interval arithmetic coding, not rANS).
 - **transformers version patch** -- `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`.
@@ -231,6 +233,7 @@ Lexis started as a research point of interest for the [OpenAI Parameter Golf Cha
 - Longformer -- [Beltagy et al. 2020](https://arxiv.org/abs/2004.05150)
 - FineWeb dataset -- [HuggingFaceFW/fineweb](https://huggingface.co/datasets/HuggingFaceFW/fineweb)
 - Neural scaling laws -- [Kaplan et al. 2020](https://arxiv.org/abs/2001.08361)
+- cmix -- [Byron Knoll, byronknoll.com/cmix.html](https://www.byronknoll.com/cmix.html)
 - lemminflect -- morphological inflection for Python
 - msgpack -- binary serialisation
 - zstd -- Zstandard compression, level 19 outer wrapper
