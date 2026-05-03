@@ -12,19 +12,19 @@ Lexis (main) achieves **2.7494 bpb char-stream on FineWeb with zero training dat
 
 ## Benchmark Results
 
-### System comparison -- char-stream bpb
+### System comparison
 
-| System | bpb (char-stream) | bpb (full payload) | Notes |
-|---|---|---|---|
-| Uncompressed UTF-8 | 8.00 | 8.00 | Baseline |
-| gzip level 9 | ≈3.50 | ≈3.50 | General-purpose |
-| zstd level 19 | ≈3.00 | ≈3.00 | General-purpose |
-| **Lexis main** | **2.7494** | **23.384** | FineWeb, 50 samples × ≤10k chars, pooled |
-| **Lexis main** | **2.6649** | **20.8391** | Moby Dick, 100k chars |
-| cmix | ≈2.00 | ≈2.00 | Classical context mixing, CPU-only |
-| GPT-2 (1.5B params) | ≈1.30 | ≈1.30 | Trained on WebText |
+| System | Corpus | bpb (char-stream) | bpb (full payload) | Notes |
+|---|---|---|---|---|
+| Uncompressed UTF-8 | — | 8.00 | 8.00 | Baseline |
+| gzip level 9 | — | ≈3.50 | ≈3.50 | General-purpose |
+| zstd level 19 | — | ≈3.00 | ≈3.00 | General-purpose |
+| **Lexis main** | **FineWeb** | **2.7494** | **23.384** | 50 samples × ≤10k chars, pooled |
+| **Lexis main** | **Moby Dick** | **2.6649** | **20.8391** | 100k chars, single document |
+| cmix | — | ≈2.00 | ≈2.00 | Classical context mixing, CPU-only |
+| GPT-2 (1.5B params) | — | ≈1.30 | ≈1.30 | Trained on WebText |
 
-*char-stream bpb = arithmetic-coded character bitstream only. full-payload bpb = complete .lexis file including all metadata (POS tags, morph codes, model state, symbol table, etc.).*
+*char-stream bpb = arithmetic-coded character bitstream only. full-payload bpb = complete .lexis file including all metadata (POS tags, morph codes, model state, symbol table, etc.). The two Lexis main rows represent different test corpora -- both are valid measurements of the same codebase.*
 
 ### Lexis main vs Lexis-E -- Moby Dick & FineWeb at 100k chars
 
