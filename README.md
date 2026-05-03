@@ -12,26 +12,44 @@ Lexis (main) achieves **2.7494 bpb char-stream on FineWeb with zero training dat
 
 ## Benchmark Results
 
-### Lexis (main branch) -- FineWeb (50 samples ×≤10k chars, all pipeline stages active)
+### System comparison -- char-stream bpb
 
 | System | bpb (char-stream) | bpb (full payload) | Notes |
 |---|---|---|---|
 | Uncompressed UTF-8 | 8.00 | 8.00 | Baseline |
 | gzip level 9 | ≈3.50 | ≈3.50 | General-purpose |
 | zstd level 19 | ≈3.00 | ≈3.00 | General-purpose |
-| **Lexis main (no training data)** | **2.7494** | **23.384** | 50 samples, pooled bytes |
+| **Lexis main** | **2.7494** | **23.384** | FineWeb, 50 samples × ≤10k chars, pooled |
+| **Lexis main** | **2.6649** | **20.8391** | Moby Dick, 100k chars |
 | cmix | ≈2.00 | ≈2.00 | Classical context mixing, CPU-only |
 | GPT-2 (1.5B params) | ≈1.30 | ≈1.30 | Trained on WebText |
 
-*char-stream bpb = arithmetic-coded character bitstream only. full-payload bpb = complete .lexis file including all metadata (POS tags, morph codes, model state, symbol table, etc.). Scores measured via `eval_fineweb_bpb.py --samples 50 --chars 10000 --seed 42`.*
+*char-stream bpb = arithmetic-coded character bitstream only. full-payload bpb = complete .lexis file including all metadata (POS tags, morph codes, model state, symbol table, etc.).*
 
-### Lexis (main branch) -- Moby Dick scaling test
+### Lexis main vs Lexis-E -- Moby Dick & FineWeb at 100k chars
+
+| Branch | Corpus | Profile | char_stream_bpb | full_payload_bpb | char_stream bytes | full_payload bytes |
+|---|---|---|---|---|---|---|
+| main | Moby Dick | N/A (fixed params) | 2.6649 | 20.8391 | 33,881 | 264,943 |
+| **Lexis-E** | **Moby Dick** | **k6s511 (default)** | **2.7555** | **11.0172** | **34,323** | **137,230** |
+| main | FineWeb | N/A (fixed params) | 2.7494\* | 23.384\* | — | — |
+| **Lexis-E** | **FineWeb** | **k6s511 (default)** | **2.7523** | **11.1048** | **34,433** | **138,926** |
+
+*\*FineWeb main-branch scores are pooled over 50 samples × ≤10k chars; Lexis-E FineWeb scores are from a single 100k-char document. The key takeaway: compact_mode (Lexis-E) cuts full-payload bpb by ~47% on Moby Dick (20.84 → 11.02) and ~52% on FineWeb (23.38 → 11.10), while char-stream bpb stays essentially the same.*
+
+### Lexis main -- FineWeb (50 samples ×≤10k chars, all pipeline stages active)
+
+| Input chars | char_stream_bpb | full_payload_bpb | Notes |
+|---|---|---|---|
+| 50 samples, pooled | 2.7494 | 23.384 | Measured via `eval_fineweb_bpb.py --samples 50 --chars 10000 --seed 42` |
+
+### Lexis main -- Moby Dick scaling test
 
 | Input chars | char_stream_bpb | full_payload_bpb | char_stream bytes | full_payload bytes |
 |---|---|---|---|---|
 | **100,000** | **2.6649** | **20.8391** | 33,881 | 264,943 |
 
-*Single-document continuous text. full_payload_bpb is high relative to Lexis-E because the main branch carries uncompressed metadata; Lexis-E's compact_mode dramatically reduces metadata overhead.*
+*Single-document continuous text. full_payload_bpb is high relative to Lexis-E because the main branch carries uncompressed metadata; Lexis-E’s compact_mode dramatically reduces metadata overhead.*
 
 ---
 
@@ -43,7 +61,7 @@ The `lexis-e` branch is the **Efficient** evolution of Lexis, developed after th
 
 After validating the 8-stage pipeline on `main`, two problems were identified:
 
-1. **Full-payload overhead** -- The main branch's `.lexis` file bundles uncompressed structural metadata (POS tag sequences, morphological codes, model weights, symbol tables). This drives the full-payload bpb to ~20-23 on real documents, even when the character stream compresses well to ~2.7 bpb. The char-stream bpb is the honest compression quality metric, but the full-payload figure is the true end-to-end storage ratio.
+1. **Full-payload overhead** -- The main branch’s `.lexis` file bundles uncompressed structural metadata (POS tag sequences, morphological codes, model weights, symbol tables). This drives the full-payload bpb to ~20-23 on real documents, even when the character stream compresses well to ~2.7 bpb. The char-stream bpb is the honest compression quality metric, but the full-payload figure is the true end-to-end storage ratio.
 2. **Fixed context-mixing parameters** -- The Stage 6 probability model had no way to tune the trade-off between prediction depth (`top_k`) and probability sharpening (`scale`), leaving performance on the table for different document types and sizes.
 
 ### What Lexis-E adds
@@ -52,13 +70,17 @@ After validating the 8-stage pipeline on `main`, two problems were identified:
 |---|---|---|
 | Metadata encoding | Raw / uncompressed | Compact binary (compact_mode) |
 | Context model tuning | Fixed parameters | Configurable `top_k` × `scale` sweep |
-| Full-payload bpb at 100k chars | 20.84 (Moby Dick) | 11.10 (FineWeb, default profile) |
-| char-stream bpb at 100k chars | 2.6649 (Moby Dick) | 2.7523 (FineWeb, default profile) |
+| Full-payload bpb at 100k chars (Moby Dick) | 20.84 | **11.02** |
+| Full-payload bpb at 100k chars (FineWeb) | 23.38\* | **11.10** |
+| char-stream bpb at 100k chars (Moby Dick) | 2.6649 | 2.7555 |
+| char-stream bpb at 100k chars (FineWeb) | 2.7494\* | 2.7523 |
 | Case flag bug fix | No | Yes -- bitmap bit-indexing corrected |
 | Profile presets | None | `default` (k6s511), `aggressive` (k6s127) |
 | Scaling test script | No | Yes (`scaling_test.py`) |
 
-The full-payload bpb improvement from **20.84 → 11.10** (a ~47% reduction) is entirely attributable to compact_mode metadata encoding, not to any change in the character-stream compression algorithm.
+*\*FineWeb main-branch scores are pooled over 50 samples × ≤10k chars, not a single 100k-char document.*
+
+The full-payload bpb improvement from **20.84 → 11.02** on Moby Dick (~47% reduction) is entirely attributable to compact_mode metadata encoding, not to any change in the character-stream compression algorithm.
 
 ---
 
@@ -167,16 +189,16 @@ The canonical Lexis(main) submission state is tagged at:
 git tag challenge-submit-updated-docs-main-2026-05-01 
 ```
 
-Commit: [`bc3582a`](https://github.com/shasankp000/Lexis/commit/bc3582ad752c3c9a36be20826e20dde0dba80c5a) -- *docs: add Lexis-E (Efficient) origin section explaining branch split and differences vs main* (same commit name, but on main branch)
+Commit: [`bc3582a`](https://github.com/shasankp000/Lexis/commit/bc3582ad752c3c9a36be20826e20dde0dba80c5a) -- *docs: add Lexis-E (Efficient) origin section explaining branch split and differences vs main*
 
-This tag marks the exact Lexis(main) codebase not directly submitted to the OpenAI Parameter Golf Challenge, but the main branch of the Lexis repository that can be accessed. Last updated on 2026-05-01
+This tag marks the exact Lexis(main) codebase not directly submitted to the OpenAI Parameter Golf Challenge, but the main branch of the Lexis repository that can be accessed. Last updated on 2026-05-01.
 
 ---
 
 ## Notes
 
 - **Semantic fidelity over byte-exact reconstruction** -- Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
-- **full_payload_bpb on short docs** -- The full-payload bpb is high (20-23 bpb on FineWeb short docs) because the .lexis metadata overhead dominates at small document sizes. The char-stream bpb (2.7494) is the fair compression quality metric. Lexis-E's compact_mode reduces metadata overhead significantly.
+- **full_payload_bpb on short docs** -- The full-payload bpb is high (20-23 bpb on FineWeb short docs) because the .lexis metadata overhead dominates at small document sizes. The char-stream bpb (2.7494) is the fair compression quality metric. Lexis-E’s compact_mode reduces metadata overhead significantly.
 - **IDE import warnings** -- your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if not launched from inside the virtual environment. This is a false positive.
 - **GPU usage** -- Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 arithmetic encoding runs on CPU (standard interval arithmetic coding, not rANS).
 - **transformers version patch** -- `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`.
