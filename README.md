@@ -41,19 +41,19 @@ The full-payload bpb improvement from **20.84 → 11.02** on Moby Dick (~47% red
 
 ## Benchmark Results
 
-### System comparison -- char-stream bpb
+### System comparison
 
-| System | bpb (char-stream) | bpb (full payload) | Notes |
-|---|---|---|---|
-| Uncompressed UTF-8 | 8.00 | 8.00 | Baseline |
-| gzip level 9 | ≈3.50 | ≈3.50 | General-purpose |
-| zstd level 19 | ≈3.00 | ≈3.00 | General-purpose |
-| **Lexis-E (no training data)** | **2.7555** | **11.0172** | Moby Dick, 100k chars, k6s511 |
-| **Lexis-E (no training data)** | **2.7523** | **11.1048** | FineWeb, 100k chars, k6s511 |
-| cmix | ≈2.00 | ≈2.00 | Classical context mixing, CPU-only |
-| GPT-2 (1.5B params) | ≈1.30 | ≈1.30 | Trained on WebText |
+| System | Corpus | bpb (char-stream) | bpb (full payload) | Notes |
+|---|---|---|---|---|
+| Uncompressed UTF-8 | — | 8.00 | 8.00 | Baseline |
+| gzip level 9 | — | ≈3.50 | ≈3.50 | General-purpose |
+| zstd level 19 | — | ≈3.00 | ≈3.00 | General-purpose |
+| **Lexis-E (no training data)** | **Moby Dick** | **2.7555** | **11.0172** | 100k chars, k6s511 (default) |
+| **Lexis-E (no training data)** | **FineWeb** | **2.7523** | **11.1048** | 100k chars, k6s511 (default) |
+| cmix | — | ≈2.00 | ≈2.00 | Classical context mixing, CPU-only |
+| GPT-2 (1.5B params) | — | ≈1.30 | ≈1.30 | Trained on WebText |
 
-*char-stream bpb = arithmetic-coded character bitstream only. full-payload bpb = complete .lexis file including all metadata (POS tags, morph codes, model state, symbol table, etc.).*
+*char-stream bpb = arithmetic-coded character bitstream only. full-payload bpb = complete .lexis file including all metadata (POS tags, morph codes, model state, symbol table, etc.). The two Lexis-E rows represent the same codebase and profile tested on different corpora.*
 
 ### Lexis main vs Lexis-E -- Moby Dick & FineWeb at 100k chars
 
