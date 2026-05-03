@@ -14,7 +14,7 @@ Lexis-E achieves **2.7523 bpb char-stream on FineWeb at 100k chars** (default pr
 
 After the core 8-stage pipeline was validated on the `main` branch, two problems were identified that motivated a dedicated branch:
 
-1. **Full-payload overhead** -- The main branch’s `.lexis` file bundles uncompressed structural metadata (POS tag sequences, morphological codes, model weights, symbol tables). This drives the full-payload bpb to ~20-23 on real documents, even when the character stream compresses well to ~2.7 bpb. The char-stream bpb is the honest compression quality metric, but the full-payload figure is the true end-to-end storage ratio -- and it was unacceptably high.
+1. **Full-payload overhead** -- The main branch's `.lexis` file bundles uncompressed structural metadata (POS tag sequences, morphological codes, model weights, symbol tables). This drives the full-payload bpb to ~20-23 on real documents, even when the character stream compresses well to ~2.7 bpb. The char-stream bpb is the honest compression quality metric, but the full-payload figure is the true end-to-end storage ratio -- and it was unacceptably high.
 2. **Fixed context-mixing parameters** -- The Stage 6 probability model had no way to tune the trade-off between prediction depth (`top_k`) and probability sharpening (`scale`), leaving performance on the table for different document types and sizes.
 
 Lexis-E addresses both through `compact_mode` -- a configurable metadata encoding mode with a sweepable `top_k × scale` grid -- without changing the character-stream compression algorithm.
@@ -50,12 +50,14 @@ The full-payload bpb improvement from **20.84 → 11.02** on Moby Dick (~47% red
 | gzip level 9 | FineWeb | 3.3948 | 3.3948 | 50 samples × ≤10k chars, pooled |
 | zstd level 19 | Moby Dick | 3.1125 | 3.1125 | 100k chars; no metadata separation |
 | zstd level 19 | FineWeb | 3.1828 | 3.1828 | 50 samples × ≤10k chars, pooled |
+| xz level 9 | Moby Dick | 3.0637 | 3.0637 | 100k chars; no metadata separation |
+| xz level 9 | FineWeb | 3.1079 | 3.1079 | 50 samples × ≤10k chars, pooled |
 | **Lexis-E (no training data)** | **Moby Dick** | **2.7555** | **11.0172** | 100k chars, k6s511 (default) |
 | **Lexis-E (no training data)** | **FineWeb** | **2.7523** | **11.1048** | 100k chars, k6s511 (default) |
-| cmix | — | ≈2.00 | ≈2.00 | Classical context mixing; pending measurement |
+| cmix | enwik8 | ≈1.17 | ≈1.17 | Classical context mixing; score from Knoll 2024 (byronknoll.com/cmix.html) |
 | GPT-2 (1.5B params) | — | ≈1.30 | ≈1.30 | Trained on WebText |
 
-*char-stream bpb = arithmetic-coded character bitstream only (Lexis) or raw compressed stream (gzip/zstd/cmix -- no metadata separation). full-payload bpb = complete .lexis file including all metadata. For gzip/zstd/cmix, char-stream bpb = full-payload bpb.*
+*char-stream bpb = arithmetic-coded character bitstream only (Lexis) or raw compressed stream (gzip/zstd/xz/cmix -- no metadata separation). full-payload bpb = complete .lexis file including all metadata. For gzip/zstd/xz/cmix, char-stream bpb = full-payload bpb. cmix score is the published enwik8 figure; it is not directly comparable to the 100k-char Moby Dick / FineWeb corpora used for all other rows.*
 
 ### Lexis main vs Lexis-E -- Moby Dick & FineWeb at 100k chars
 
@@ -257,7 +259,7 @@ This tag marks the exact Lexis-E codebase submitted to the [OpenAI Parameter Gol
 
 - **Semantic fidelity over byte-exact reconstruction** -- Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
 - **full_payload_bpb vs char_stream_bpb** -- char_stream_bpb (2.7523 FineWeb / 2.7555 Moby Dick) measures compression quality of the character sequence alone. full_payload_bpb (11.10 FineWeb / 11.02 Moby Dick) includes all structural metadata; it is the honest end-to-end ratio. compact_mode dramatically reduces metadata overhead vs the main branch (11.1 vs 20.8 at 100k chars).
-- **cmix score pending** -- cmix is being set up for local benchmarking and will be added once measured.
+- **cmix score** -- The cmix row uses the published enwik8 bpb (≈1.17) from Byron Knoll's cmix page ([byronknoll.com/cmix.html](https://www.byronknoll.com/cmix.html)). cmix requires ~32 GB RAM to run locally; the published figure is cited rather than measured. Note the enwik8 corpus differs from Moby Dick / FineWeb, so this row is for reference context only.
 - **IDE import warnings** -- your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if not launched from inside the virtual environment. This is a false positive.
 - **GPU usage** -- Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 arithmetic encoding runs on CPU (standard interval arithmetic coding, not rANS).
 - **transformers version patch** -- `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`.
@@ -287,6 +289,7 @@ Lexis started as a research point of interest for the [OpenAI Parameter Golf Cha
 - Longformer -- [Beltagy et al. 2020](https://arxiv.org/abs/2004.05150)
 - FineWeb dataset -- [HuggingFaceFW/fineweb](https://huggingface.co/datasets/HuggingFaceFW/fineweb)
 - Neural scaling laws -- [Kaplan et al. 2020](https://arxiv.org/abs/2001.08361)
+- cmix -- [Byron Knoll, byronknoll.com/cmix.html](https://www.byronknoll.com/cmix.html)
 - lemminflect -- morphological inflection for Python
 - msgpack -- binary serialisation
 - zstd -- Zstandard compression, level 19 outer wrapper
