@@ -2,7 +2,7 @@
 
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
-Lexis-E achieves **2.7523 bpb char-stream on FineWeb at 100k chars** (default profile `k6s511`, compact_mode), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure -- no learned weights, no training corpus. The "E" stands for **Efficient** -- Lexis-E exists to solve the metadata overhead problem of the main branch.
+Lexis-E achieves **2.7523 bpb char-stream on FineWeb at 100k chars** (default profile `k6s511`, compact_mode), outperforming gzip (3.3948 bpb) and zstd (3.1828 bpb) purely through explicit linguistic structure -- no learned weights, no training corpus. The "E" stands for **Efficient** -- Lexis-E exists to solve the metadata overhead problem of the main branch.
 
 > *"How much of the compressibility of English comes from its linguistic structure alone, versus from statistical regularities in training data?"*
 >
@@ -46,14 +46,16 @@ The full-payload bpb improvement from **20.84 → 11.02** on Moby Dick (~47% red
 | System | Corpus | bpb (char-stream) | bpb (full payload) | Notes |
 |---|---|---|---|---|
 | Uncompressed UTF-8 | — | 8.00 | 8.00 | Baseline |
-| gzip level 9 | — | ≈3.50 | ≈3.50 | General-purpose |
-| zstd level 19 | — | ≈3.00 | ≈3.00 | General-purpose |
+| gzip level 9 | Moby Dick | 3.3230 | 3.3230 | 100k chars; no metadata separation |
+| gzip level 9 | FineWeb | 3.3948 | 3.3948 | 50 samples × ≤10k chars, pooled |
+| zstd level 19 | Moby Dick | 3.1125 | 3.1125 | 100k chars; no metadata separation |
+| zstd level 19 | FineWeb | 3.1828 | 3.1828 | 50 samples × ≤10k chars, pooled |
 | **Lexis-E (no training data)** | **Moby Dick** | **2.7555** | **11.0172** | 100k chars, k6s511 (default) |
 | **Lexis-E (no training data)** | **FineWeb** | **2.7523** | **11.1048** | 100k chars, k6s511 (default) |
-| cmix | — | ≈2.00 | ≈2.00 | Classical context mixing, CPU-only |
+| cmix | — | ≈2.00 | ≈2.00 | Classical context mixing; pending measurement |
 | GPT-2 (1.5B params) | — | ≈1.30 | ≈1.30 | Trained on WebText |
 
-*char-stream bpb = arithmetic-coded character bitstream only. full-payload bpb = complete .lexis file including all metadata (POS tags, morph codes, model state, symbol table, etc.). The two Lexis-E rows represent the same codebase and profile tested on different corpora.*
+*char-stream bpb = arithmetic-coded character bitstream only (Lexis) or raw compressed stream (gzip/zstd/cmix -- no metadata separation). full-payload bpb = complete .lexis file including all metadata. For gzip/zstd/cmix, char-stream bpb = full-payload bpb.*
 
 ### Lexis main vs Lexis-E -- Moby Dick & FineWeb at 100k chars
 
@@ -255,6 +257,7 @@ This tag marks the exact Lexis-E codebase submitted to the [OpenAI Parameter Gol
 
 - **Semantic fidelity over byte-exact reconstruction** -- Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
 - **full_payload_bpb vs char_stream_bpb** -- char_stream_bpb (2.7523 FineWeb / 2.7555 Moby Dick) measures compression quality of the character sequence alone. full_payload_bpb (11.10 FineWeb / 11.02 Moby Dick) includes all structural metadata; it is the honest end-to-end ratio. compact_mode dramatically reduces metadata overhead vs the main branch (11.1 vs 20.8 at 100k chars).
+- **cmix score pending** -- cmix is being set up for local benchmarking and will be added once measured.
 - **IDE import warnings** -- your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if not launched from inside the virtual environment. This is a false positive.
 - **GPU usage** -- Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 arithmetic encoding runs on CPU (standard interval arithmetic coding, not rANS).
 - **transformers version patch** -- `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`.
