@@ -2,7 +2,7 @@
 
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
-Lexis (main) achieves **2.7494 bpb char-stream on FineWeb with zero training data** (50 samples, pooled bytes), outperforming gzip (≈3.5 bpb) and zstd (≈3.0 bpb) purely through explicit linguistic structure -- no learned weights, no training corpus.
+Lexis (main) achieves **2.7494 bpb char-stream on FineWeb with zero training data** (50 samples, pooled bytes), outperforming gzip (3.3948 bpb) and zstd (3.1828 bpb) purely through explicit linguistic structure -- no learned weights, no training corpus.
 
 > *"How much of the compressibility of English comes from its linguistic structure alone, versus from statistical regularities in training data?"*
 >
@@ -17,14 +17,16 @@ Lexis (main) achieves **2.7494 bpb char-stream on FineWeb with zero training dat
 | System | Corpus | bpb (char-stream) | bpb (full payload) | Notes |
 |---|---|---|---|---|
 | Uncompressed UTF-8 | — | 8.00 | 8.00 | Baseline |
-| gzip level 9 | — | ≈3.50 | ≈3.50 | General-purpose |
-| zstd level 19 | — | ≈3.00 | ≈3.00 | General-purpose |
+| gzip level 9 | Moby Dick | 3.3230 | 3.3230 | 100k chars; no metadata separation |
+| gzip level 9 | FineWeb | 3.3948 | 3.3948 | 50 samples × ≤10k chars, pooled |
+| zstd level 19 | Moby Dick | 3.1125 | 3.1125 | 100k chars; no metadata separation |
+| zstd level 19 | FineWeb | 3.1828 | 3.1828 | 50 samples × ≤10k chars, pooled |
 | **Lexis main** | **FineWeb** | **2.7494** | **23.384** | 50 samples × ≤10k chars, pooled |
 | **Lexis main** | **Moby Dick** | **2.6649** | **20.8391** | 100k chars, single document |
-| cmix | — | ≈2.00 | ≈2.00 | Classical context mixing, CPU-only |
+| cmix | — | ≈2.00 | ≈2.00 | Classical context mixing; pending measurement |
 | GPT-2 (1.5B params) | — | ≈1.30 | ≈1.30 | Trained on WebText |
 
-*char-stream bpb = arithmetic-coded character bitstream only. full-payload bpb = complete .lexis file including all metadata (POS tags, morph codes, model state, symbol table, etc.). The two Lexis main rows represent different test corpora -- both are valid measurements of the same codebase.*
+*char-stream bpb = arithmetic-coded character bitstream only (Lexis) or raw compressed stream (gzip/zstd/cmix -- no metadata separation). full-payload bpb = complete .lexis file including all metadata. For gzip/zstd/cmix, char-stream bpb = full-payload bpb.*
 
 ### Lexis main vs Lexis-E -- Moby Dick & FineWeb at 100k chars
 
@@ -199,6 +201,7 @@ This tag marks the exact Lexis(main) codebase not directly submitted to the Open
 
 - **Semantic fidelity over byte-exact reconstruction** -- Stage 1 sentence boundary detection produces minor punctuation normalizations at quote boundaries. These do not affect meaning, information content, or bpb measurement.
 - **full_payload_bpb on short docs** -- The full-payload bpb is high (20-23 bpb on FineWeb short docs) because the .lexis metadata overhead dominates at small document sizes. The char-stream bpb (2.7494) is the fair compression quality metric. Lexis-E’s compact_mode reduces metadata overhead significantly.
+- **cmix score pending** -- cmix is running on AMD Ryzen 9 8940HX; scores will be updated once complete.
 - **IDE import warnings** -- your IDE may flag an import error in `stage4_discourse.py` for `fastcoref` if not launched from inside the virtual environment. This is a false positive.
 - **GPU usage** -- Stage 3 (spaCy) and Stage 4 (Longformer coreference, 90.5M params) use GPU when available. Stage 7 arithmetic encoding runs on CPU (standard interval arithmetic coding, not rANS).
 - **transformers version patch** -- `transformers/dependency_versions_table.py` requires manual patching to remove the `huggingface-hub<1.0` upper bound if your environment has `huggingface-hub>=1.0`.
