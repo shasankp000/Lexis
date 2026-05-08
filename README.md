@@ -143,6 +143,7 @@ Lexis-E compresses text through a **12-stage pipeline** that progressively strip
 ![docs3](./docs/lexis-e-architecture_00003.svg)
 ![docs4](./docs/lexis-e-architecture_00004.svg)
 ![docs6](./docs/lexis-e-architecture_00005.svg)
+![docs6](./docs/lexis-e-architecture_00006.svg)
 
 ### Key Technical Contributions
 
