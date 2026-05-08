@@ -138,9 +138,11 @@ Two profiles are shipped:
 
 Lexis-E compresses text through a **12-stage pipeline** that progressively strips linguistic redundancy at every level of English structure.
 
-> 📊 **[Open Interactive Architecture Diagram](https://htmlpreview.github.io/?https://github.com/shasankp000/Lexis/blob/lexis-e/docs/architecture.html)** — 12 stages, collapsible phase groups, click-to-expand stage details, light/dark theme.
->
-> *(The diagram is a fully self-contained HTML file at [`docs/architecture.html`](docs/architecture.html). GitHub Markdown cannot render interactive HTML inline — use the htmlpreview link above to view it in-browser, or open the file locally.)*
+![docs1](./docs/lexis-e-architecture_00001.svg)
+![docs2](./docs/lexis-e-architecture_00002.svg)
+![docs3](./docs/lexis-e-architecture_00003.svg)
+![docs4](./docs/lexis-e-architecture_00004.svg)
+![docs6](./docs/lexis-e-architecture_00005.svg)
 
 ### Key Technical Contributions
 
