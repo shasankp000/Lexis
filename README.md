@@ -1,3 +1,4 @@
+
 # Lexis-E (Efficient)
 
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
@@ -135,33 +136,146 @@ Two profiles are shipped:
 
 ## How It Works
 
-Lexis-E compresses text through an 8-stage pipeline that progressively strips linguistic redundancy at every level of English structure:
+Lexis-E compresses text through a **12-stage pipeline** that progressively strips linguistic redundancy at every level of English structure.
 
-```
-Raw Text
-   ↓
-[Stage 1]  Normalization          -- sentence boundaries, whitespace, UTF-8, BOM stripping
-   ↓
-[Stage 1b] Word Substitution      -- frequency-based §W tokens, net-saving guard
-   ↓
-[Stage 1c] Symbol Slot Extraction -- §E/§W tokens stripped, char offsets recorded
-   ↓
-[Stage 2]  Morphological Analysis -- root + transformation codes (15.1% char reduction)
-   ↓
-[Stage 3]  Syntactic Parsing      -- POS tags, dependency trees, sentence type, voice
-   ↓
-[Stage 4]  Discourse Analysis     -- coreference resolution, symbolic entity links
-   ↓
-[Stage 5]  Symbolic Encoding      -- phonetic decomposition, delta streams, factoriadic
-              ↳ case_flags / case_bitmaps per token (4 categories: lower/title/upper/mixed)
-   ↓
-[Stage 6]  Probability Modeling   -- 3-level online context-mixing model (no prior training)
-              ↳ compact_mode: configurable top_k × scale sweep
-   ↓
-[Stage 7]  Arithmetic Encoding    -- interval arithmetic coding on probability-weighted symbol stream
-                                     (NOTE: this is standard arithmetic coding, NOT rANS)
-   ↓
-[Stage 8]  Decoding               -- full reverse pipeline, semantic fidelity preserved
+> 📊 **[Interactive Architecture Diagram](docs/architecture.html)** — full visual with stage details, data flow, and compact_mode annotations.
+
+```mermaid
+flowchart TD
+    A([🔤 Raw Text]) --> S1
+
+    subgraph PREPROCESSING ["⚙️  Pre-processing  (Stages 1 – 1c)"]
+        S1["**Stage 1**
+        Normalization
+        ─────────────────
+        Sentence boundaries · whitespace
+        UTF-8 cleaning · BOM stripping"]
+        S1b["**Stage 1b**
+        Word Substitution
+        ─────────────────
+        Frequency-based §W tokens
+        Net-saving guard"]
+        S1c["**Stage 1c**
+        Symbol Slot Extraction
+        ─────────────────
+        §E / §W tokens stripped
+        Char offsets recorded
+        Anchor-based splice table built"]
+        S1 --> S1b --> S1c
+    end
+
+    subgraph LINGUISTIC ["🧠  Linguistic Analysis  (Stages 2 – 4)"]
+        S2["**Stage 2**
+        Morphological Analysis
+        ─────────────────
+        Root + transformation codes
+        15.1% char reduction"]
+        S3["**Stage 3**
+        Syntactic Parsing
+        ─────────────────
+        POS tags · dependency trees
+        Sentence type · voice
+        (spaCy, GPU)"]
+        S4["**Stage 4**
+        Discourse Analysis
+        ─────────────────
+        Coreference resolution
+        Symbolic entity links
+        (Longformer, 90.5M params, GPU)"]
+        S2 --> S3 --> S4
+    end
+
+    subgraph ENCODING ["🔢  Symbolic Encoding  (Stages 5 – 5b)"]
+        S5["**Stage 5**
+        Symbolic Encoding
+        ─────────────────
+        Phonetic decomposition
+        Mixed-radix delta streams
+        Factoriadic delta encoding
+        2.42× delta magnitude reduction"]
+        S5b["**Stage 5b**
+        Case Flag Encoding
+        ─────────────────
+        4 categories: LOWER · TITLE · UPPER · MIXED
+        Per-char bitmap for MIXED tokens
+        Bug fix: bit N ↔ char index N (Lexis-E)"]
+        S5 --> S5b
+    end
+
+    subgraph PROBABILITY ["📈  Probability Modeling  (Stage 6)"]
+        S6["**Stage 6**
+        Context-Mixing Model
+        ─────────────────
+        3-level online model (no offline training)
+        Trains on document being compressed
+        compact_mode: top_k × scale sweep
+        Default profile: k6s511"]
+    end
+
+    subgraph COMPRESSION ["🗜️  Compression  (Stage 7)"]
+        S7["**Stage 7**
+        Arithmetic Encoding
+        ─────────────────
+        Interval arithmetic coding
+        Probability-weighted symbol stream
+        Standard AC — not rANS"]
+    end
+
+    subgraph OUTPUT ["📦  Output  (Stages 8 – 9)"]
+        S8["**Stage 8**
+        Decoding
+        ─────────────────
+        Full reverse pipeline
+        Semantic fidelity preserved
+        Symbol slots re-spliced"]
+        S9["**Stage 9**
+        Word Joining & Autocorrect
+        ─────────────────
+        Morphological re-inflection
+        Surface form restoration"]
+        S8 --> S9
+    end
+
+    subgraph METADATA ["🗃️  Metadata Codec  (Stages 10 – 12)"]
+        S10["**Stage 10**
+        Compact Metadata Envelope
+        ─────────────────
+        Binary msgpack serialisation
+        zstd level-19 outer wrapper
+        47–52% payload reduction vs main"]
+        S11["**Stage 11**
+        Integration Tests
+        ─────────────────
+        Round-trip fidelity checks
+        char_stream_bpb validation"]
+        S12["**Stage 12**
+        End-to-End Benchmark
+        ─────────────────
+        eval_fineweb_bpb · scaling_test
+        Full pipeline_trace green check"]
+        S10 --> S11 --> S12
+    end
+
+    PREPROCESSING --> LINGUISTIC
+    LINGUISTIC --> ENCODING
+    ENCODING --> PROBABILITY
+    PROBABILITY --> COMPRESSION
+    COMPRESSION --> OUTPUT
+    OUTPUT --> METADATA
+
+    S12 --> Z([📄 .lexis File
+    char_stream_bpb: 2.7523
+    full_payload_bpb: 11.10])
+
+    style PREPROCESSING fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
+    style LINGUISTIC fill:#1e293b,stroke:#8b5cf6,color:#e2e8f0
+    style ENCODING fill:#1e293b,stroke:#10b981,color:#e2e8f0
+    style PROBABILITY fill:#1e293b,stroke:#f59e0b,color:#e2e8f0
+    style COMPRESSION fill:#1e293b,stroke:#ef4444,color:#e2e8f0
+    style OUTPUT fill:#1e293b,stroke:#06b6d4,color:#e2e8f0
+    style METADATA fill:#1e293b,stroke:#a855f7,color:#e2e8f0
+    style A fill:#0f172a,stroke:#3b82f6,color:#93c5fd
+    style Z fill:#0f172a,stroke:#10b981,color:#6ee7b7
 ```
 
 ### Key Technical Contributions
@@ -178,7 +292,7 @@ Raw Text
 
 **Factoriadic delta encoding** -- Symbol deltas encoded in the factorial number system; compact for the small, frequent steps that dominate linguistically-constrained sequences.
 
-**Case flag encoding (Stage 5)** -- Each token surface form is classified into one of four case categories (LOWER=0, TITLE=1, UPPER=2, MIXED=3). MIXED tokens additionally carry a per-character bitmap where bit N corresponds to char index N of the surface form. This allows lossless case restoration without storing any raw uppercase characters in the char stream. Bug fix applied in Lexis-E: bitmap bit-indexing in both `compute_case_flag` and `apply_case_flag` was corrected to use a consistent `bit N ↔ char index N` convention throughout.
+**Case flag encoding (Stage 5b)** -- Each token surface form is classified into one of four case categories (LOWER=0, TITLE=1, UPPER=2, MIXED=3). MIXED tokens additionally carry a per-character bitmap where bit N corresponds to char index N of the surface form. This allows lossless case restoration without storing any raw uppercase characters in the char stream. Bug fix applied in Lexis-E: bitmap bit-indexing in both `compute_case_flag` and `apply_case_flag` was corrected to use a consistent `bit N ↔ char index N` convention throughout.
 
 **compact_mode** -- The context-mixing model (Stage 6) exposes `top_k` (active prediction contexts) and `scale` (probability sharpening). A 4×4 grid sweep identified `k6s511` as the Pareto-optimal default.
 
