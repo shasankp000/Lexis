@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lexis-E Architecture — 12-Stage Pipeline</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #161b22;
+  --surface2: #1c2128;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --text-faint: #484f58;
+  --accent-blue: #58a6ff;
+  --accent-purple: #bc8cff;
+  --accent-green: #3fb950;
+  --accent-amber: #d29922;
+  --accent-red: #f85149;
+  --accent-cyan: #39d353;
+  --accent-teal: #2ea043;
+  --stage-pre: #1f3a5f;
+  --stage-pre-border: #58a6ff;
+  --stage-ling: #2d1f5f;
+  --stage-ling-border: #bc8cff;
+  --stage-enc: #1f3a2f;
+  --stage-enc-border: #3fb950;
+  --stage-prob: #3a2d1f;
+  --stage-prob-border: #d29922;
+  --stage-comp: #3a1f1f;
+  --stage-comp-border: #f85149;
+  --stage-out: #1f3a3a;
+  --stage-out-border: #39d353;
+  --stage-meta: #2d1f3a;
+  --stage-meta-border: #bc8cff;
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --transition: 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+[data-theme="light"] {
+  --bg: #f6f8fa;
+  --surface: #ffffff;
+  --surface2: #f0f3f6;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --text-muted: #636c76;
+  --text-faint: #9198a1;
+  --stage-pre: #dbeafe;
+  --stage-pre-border: #2563eb;
+  --stage-ling: #ede9fe;
+  --stage-ling-border: #7c3aed;
+  --stage-enc: #dcfce7;
+  --stage-enc-border: #16a34a;
+  --stage-prob: #fef9c3;
+  --stage-prob-border: #ca8a04;
+  --stage-comp: #fee2e2;
+  --stage-comp-border: #dc2626;
+  --stage-out: #cffafe;
+  --stage-out-border: #0891b2;
+  --stage-meta: #f3e8ff;
+  --stage-meta-border: #9333ea;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 14px; scroll-behavior: smooth; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+/* ── Header ── */
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  gap: 12px;
+}
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header-logo {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 15px; font-weight: 600; color: var(--text);
+  text-decoration: none;
+}
+.logo-icon {
+  width: 28px; height: 28px;
+  background: linear-gradient(135deg, #58a6ff 0%, #bc8cff 100%);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.branch-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  color: var(--accent-blue);
+}
+.header-right { display: flex; align-items: center; gap: 8px; }
+.btn-toggle {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px 10px;
+  font-size: 13px;
+  transition: all var(--transition);
+  display: flex; align-items: center; gap: 6px;
+}
+.btn-toggle:hover { background: var(--border); color: var(--text); }
+.bpb-stat {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent-green);
+  background: rgba(63, 185, 80, 0.1);
+  border: 1px solid rgba(63, 185, 80, 0.3);
+  border-radius: 4px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+/* ── Main layout ── */
+main { padding: 24px; max-width: 1400px; margin: 0 auto; }
+
+/* ── Phase groups ── */
+.pipeline-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.phase-group {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.phase-header {
+  padding: 10px 16px;
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition);
+}
+.phase-header:hover { filter: brightness(1.1); }
+.phase-icon { font-size: 16px; }
+.phase-label { flex: 1; }
+.phase-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.7;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.phase-chevron {
+  width: 16px; height: 16px;
+  transition: transform var(--transition);
+  opacity: 0.6;
+}
+.phase-group.collapsed .phase-chevron { transform: rotate(-90deg); }
+.phase-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+  max-height: 1000px;
+}
+.phase-group.collapsed .phase-body { max-height: 0; }
+
+.phase-pre .phase-header { background: var(--stage-pre); color: var(--stage-pre-border); }
+.phase-ling .phase-header { background: var(--stage-ling); color: var(--stage-ling-border); }
+.phase-enc .phase-header { background: var(--stage-enc); color: var(--stage-enc-border); }
+.phase-prob .phase-header { background: var(--stage-prob); color: var(--stage-prob-border); }
+.phase-comp .phase-header { background: var(--stage-comp); color: var(--stage-comp-border); }
+.phase-out .phase-header { background: var(--stage-out); color: var(--stage-out-border); }
+.phase-meta .phase-header { background: var(--stage-meta); color: var(--stage-meta-border); }
+
+.phase-pre { border-color: var(--stage-pre-border); }
+.phase-ling { border-color: var(--stage-ling-border); }
+.phase-enc { border-color: var(--stage-enc-border); }
+.phase-prob { border-color: var(--stage-prob-border); }
+.phase-comp { border-color: var(--stage-comp-border); }
+.phase-out { border-color: var(--stage-out-border); }
+.phase-meta { border-color: var(--stage-meta-border); }
+
+/* ── Stage cards ── */
+.stage-card {
+  background: var(--surface);
+  padding: 16px;
+  cursor: pointer;
+  transition: background var(--transition);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 120px;
+}
+.stage-card:hover { background: var(--surface2); }
+.stage-card.active { background: var(--surface2); }
+.stage-card::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0;
+  width: 3px; height: 100%;
+}
+.phase-pre .stage-card::after { background: var(--stage-pre-border); }
+.phase-ling .stage-card::after { background: var(--stage-ling-border); }
+.phase-enc .stage-card::after { background: var(--stage-enc-border); }
+.phase-prob .stage-card::after { background: var(--stage-prob-border); }
+.phase-comp .stage-card::after { background: var(--stage-comp-border); }
+.phase-out .stage-card::after { background: var(--stage-out-border); }
+.phase-meta .stage-card::after { background: var(--stage-meta-border); }
+
+.stage-id {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+}
+.stage-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+.stage-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  flex: 1;
+}
+.stage-tags {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  margin-top: 4px;
+}
+.tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.tag-blue { background: rgba(88,166,255,0.12); color: #58a6ff; border: 1px solid rgba(88,166,255,0.2); }
+.tag-green { background: rgba(63,185,80,0.12); color: #3fb950; border: 1px solid rgba(63,185,80,0.2); }
+.tag-amber { background: rgba(210,153,34,0.12); color: #d29922; border: 1px solid rgba(210,153,34,0.2); }
+.tag-purple { background: rgba(188,140,255,0.12); color: #bc8cff; border: 1px solid rgba(188,140,255,0.2); }
+.tag-red { background: rgba(248,81,73,0.12); color: #f85149; border: 1px solid rgba(248,81,73,0.2); }
+.tag-cyan { background: rgba(57,211,83,0.12); color: #39d353; border: 1px solid rgba(57,211,83,0.2); }
+
+/* ── Detail panel ── */
+.detail-panel {
+  position: fixed;
+  right: 0; top: 0; bottom: 0;
+  width: 380px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  z-index: 200;
+  display: flex; flex-direction: column;
+  transform: translateX(100%);
+  transition: transform var(--transition);
+  overflow-y: auto;
+}
+.detail-panel.open { transform: translateX(0); }
+.detail-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: flex-start; gap: 12px;
+  position: sticky; top: 0;
+  background: var(--surface);
+}
+.detail-stage-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 2px;
+}
+.detail-stage-name {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+  flex: 1;
+}
+.detail-close {
+  background: none; border: none; cursor: pointer;
+  color: var(--text-muted); padding: 2px; border-radius: 4px;
+  font-size: 18px; line-height: 1; flex-shrink: 0;
+  transition: color var(--transition);
+}
+.detail-close:hover { color: var(--text); }
+.detail-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+.detail-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+.detail-description {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.65;
+}
+.detail-bullets {
+  list-style: none;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.detail-bullets li {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  padding-left: 16px;
+  position: relative;
+}
+.detail-bullets li::before {
+  content: '▸';
+  position: absolute; left: 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  top: 3px;
+}
+.detail-code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: var(--accent-blue);
+  overflow-x: auto;
+  white-space: pre;
+  line-height: 1.6;
+}
+.detail-metric {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.detail-metric-label { font-size: 12px; color: var(--text-muted); }
+.detail-metric-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-green);
+}
+
+/* ── Overlay ── */
+.overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 199;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--transition);
+}
+.overlay.active { opacity: 1; pointer-events: all; }
+
+/* ── Flow connector ── */
+.flow-connector {
+  display: flex; align-items: center; justify-content: center;
+  padding: 4px 0;
+  color: var(--text-faint);
+  font-size: 18px;
+  user-select: none;
+}
+
+/* ── Start/End nodes ── */
+.pipeline-node {
+  display: flex; align-items: center; justify-content: center;
+  padding: 12px 24px;
+  border-radius: var(--radius-lg);
+  font-size: 13px; font-weight: 600;
+  text-align: center; align-self: center;
+  min-width: 200px;
+}
+.node-start {
+  background: rgba(88,166,255,0.1);
+  border: 1px solid var(--accent-blue);
+  color: var(--accent-blue);
+}
+.node-end {
+  background: rgba(63,185,80,0.1);
+  border: 1px solid var(--accent-green);
+  color: var(--accent-green);
+}
+
+/* ── Summary stats bar ── */
+.stats-bar {
+  display: flex; flex-wrap: wrap; gap: 12px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.stat-item { display: flex; flex-direction: column; gap: 2px; }
+.stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+.stat-value { font-family: var(--font-mono); font-size: 14px; font-weight: 700; }
+.stat-blue { color: var(--accent-blue); }
+.stat-green { color: var(--accent-green); }
+.stat-amber { color: var(--accent-amber); }
+.stat-purple { color: var(--accent-purple); }
+.stat-divider { width: 1px; background: var(--border); margin: 0 4px; align-self: stretch; }
+
+/* ── Responsive ── */
+@media (max-width: 600px) {
+  main { padding: 12px; }
+  .detail-panel { width: 100%; }
+  .stats-bar { gap: 8px; }
+  .phase-body { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <a class="header-logo" href="#">
+      <div class="logo-icon">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M2 3h12M2 8h8M2 13h5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+          <circle cx="13" cy="11" r="2.5" stroke="#fff" stroke-width="1.2"/>
+          <path d="M15 13l1.5 1.5" stroke="#fff" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      Lexis-E Architecture
+    </a>
+    <span class="branch-badge">lexis-e</span>
+  </div>
+  <div class="header-right">
+    <span class="bpb-stat">2.7523 bpb · FineWeb 100k</span>
+    <button class="btn-toggle" id="themeToggle" aria-label="Toggle theme">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      Theme
+    </button>
+  </div>
+</header>
+
+<main>
+
+<div class="stats-bar">
+  <div class="stat-item"><div class="stat-label">Pipeline Stages</div><div class="stat-value stat-blue">12</div></div>
+  <div class="stat-divider"></div>
+  <div class="stat-item"><div class="stat-label">char-stream bpb</div><div class="stat-value stat-green">2.7523</div></div>
+  <div class="stat-divider"></div>
+  <div class="stat-item"><div class="stat-label">full-payload bpb</div><div class="stat-value stat-amber">11.10</div></div>
+  <div class="stat-divider"></div>
+  <div class="stat-item"><div class="stat-label">vs gzip</div><div class="stat-value stat-green">−19% bpb</div></div>
+  <div class="stat-divider"></div>
+  <div class="stat-item"><div class="stat-label">vs main (payload)</div><div class="stat-value stat-purple">−47%</div></div>
+  <div class="stat-divider"></div>
+  <div class="stat-item"><div class="stat-label">Default Profile</div><div class="stat-value stat-blue">k6s511</div></div>
+</div>
+
+<div class="pipeline-container">
+
+  <div class="pipeline-node node-start">🔤 Raw Text Input</div>
+  <div class="flow-connector">↓</div>
+
+  <!-- PRE-PROCESSING -->
+  <div class="phase-group phase-pre" id="group-pre">
+    <div class="phase-header" onclick="toggleGroup('pre')">
+      <span class="phase-icon">⚙️</span>
+      <span class="phase-label">Pre-processing</span>
+      <span class="phase-count">Stages 1 · 1b · 1c</span>
+      <svg class="phase-chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 6L8 9.5 11.5 6"/></svg>
+    </div>
+    <div class="phase-body">
+      <div class="stage-card" onclick="openDetail('s1')">
+        <div class="stage-id">Stage 1</div>
+        <div class="stage-name">Normalization</div>
+        <div class="stage-desc">Sentence boundaries, whitespace collapse, UTF-8 cleaning, BOM stripping, typographic Unicode → ASCII.</div>
+        <div class="stage-tags"><span class="tag tag-blue">text-clean</span><span class="tag tag-blue">utf-8</span></div>
+      </div>
+      <div class="stage-card" onclick="openDetail('s1b')">
+        <div class="stage-id">Stage 1b</div>
+        <div class="stage-name">Word Substitution</div>
+        <div class="stage-desc">High-frequency words replaced with compact §W{n} tokens. Net-saving guard prevents substitution when it increases byte count.</div>
+        <div class="stage-tags"><span class="tag tag-blue">§W tokens</span><span class="tag tag-blue">frequency</span></div>
+      </div>
+      <div class="stage-card" onclick="openDetail('s1c')">
+        <div class="stage-id">Stage 1c</div>
+        <div class="stage-name">Symbol Slot Extraction</div>
+        <div class="stage-desc">§E/§W tokens stripped from char stream. Offsets recorded via anchor-based interpolation every 200 chars.</div>
+        <div class="stage-tags"><span class="tag tag-blue">§E slots</span><span class="tag tag-blue">anchors</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-connector">↓</div>
+
+  <!-- LINGUISTIC -->
+  <div class="phase-group phase-ling" id="group-ling">
+    <div class="phase-header" onclick="toggleGroup('ling')">
+      <span class="phase-icon">🧠</span>
+      <span class="phase-label">Linguistic Analysis</span>
+      <span class="phase-count">Stages 2 · 3 · 4</span>
+      <svg class="phase-chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 6L8 9.5 11.5 6"/></svg>
+    </div>
+    <div class="phase-body">
+      <div class="stage-card" onclick="openDetail('s2')">
+        <div class="stage-id">Stage 2</div>
+        <div class="stage-name">Morphological Analysis</div>
+        <div class="stage-desc">Words decomposed into (root, transformation_code) pairs. Covers BASE, PLURAL, PAST_TENSE, GERUND etc. ~15.1% char reduction.</div>
+        <div class="stage-tags"><span class="tag tag-purple">−15.1% chars</span><span class="tag tag-purple">lemminflect</span></div>
+      </div>
+      <div class="stage-card" onclick="openDetail('s3')">
+        <div class="stage-id">Stage 3</div>
+        <div class="stage-name">Syntactic Parsing</div>
+        <div class="stage-desc">spaCy (en_core_web_trf, GPU-optional) produces Universal POS tags, dependency trees, sentence type, and voice (active/passive).</div>
+        <div class="stage-tags"><span class="tag tag-purple">spaCy</span><span class="tag tag-purple">GPU</span><span class="tag tag-purple">POS</span></div>
+      </div>
+      <div class="stage-card" onclick="openDetail('s4')">
+        <div class="stage-id">Stage 4</div>
+        <div class="stage-name">Discourse Analysis</div>
+        <div class="stage-desc">Longformer-based coreference resolution (90.5M params). Entity mention chains linked as symbolic references. Net-negative below ~800 bytes.</div>
+        <div class="stage-tags"><span class="tag tag-purple">Longformer</span><span class="tag tag-purple">90.5M params</span><span class="tag tag-purple">GPU</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-connector">↓</div>
+
+  <!-- ENCODING -->
+  <div class="phase-group phase-enc" id="group-enc">
+    <div class="phase-header" onclick="toggleGroup('enc')">
+      <span class="phase-icon">🔢</span>
+      <span class="phase-label">Symbolic Encoding</span>
+      <span class="phase-count">Stages 5 · 5b</span>
+      <svg class="phase-chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 6L8 9.5 11.5 6"/></svg>
+    </div>
+    <div class="phase-body">
+      <div class="stage-card" onclick="openDetail('s5')">
+        <div class="stage-id">Stage 5</div>
+        <div class="stage-name">Symbolic Encoding</div>
+        <div class="stage-desc">Phonetic decomposition into (class, position, morph role) triples. Mixed-radix delta streams. Factoriadic encoding. 2.42× delta magnitude reduction.</div>
+        <div class="stage-tags"><span class="tag tag-green">−2.42× delta</span><span class="tag tag-green">factoriadic</span></div>
+      </div>
+      <div class="stage-card" onclick="openDetail('s5b')">
+        <div class="stage-id">Stage 5b</div>
+        <div class="stage-name">Case Flag Encoding</div>
+        <div class="stage-desc">4-category case classification: LOWER · TITLE · UPPER · MIXED. MIXED tokens carry per-character bitmap. Bug-fix in Lexis-E: bit N ↔ char index N.</div>
+        <div class="stage-tags"><span class="tag tag-green">bitmap</span><span class="tag tag-green">lossless</span><span class="tag tag-green">bug-fix</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-connector">↓</div>
+
+  <!-- PROBABILITY -->
+  <div class="phase-group phase-prob" id="group-prob">
+    <div class="phase-header" onclick="toggleGroup('prob')">
+      <span class="phase-icon">📈</span>
+      <span class="phase-label">Probability Modeling</span>
+      <span class="phase-count">Stage 6</span>
+      <svg class="phase-chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 6L8 9.5 11.5 6"/></svg>
+    </div>
+    <div class="phase-body">
+      <div class="stage-card" onclick="openDetail('s6')">
+        <div class="stage-id">Stage 6</div>
+        <div class="stage-name">Context-Mixing Model</div>
+        <div class="stage-desc">3-level online model trained solely on the document being compressed. No offline corpus. Adaptive Dirichlet-weighted blending. compact_mode: top_k × scale sweep.</div>
+        <div class="stage-tags"><span class="tag tag-amber">online</span><span class="tag tag-amber">k6s511</span><span class="tag tag-amber">compact_mode</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-connector">↓</div>
+
+  <!-- COMPRESSION -->
+  <div class="phase-group phase-comp" id="group-comp">
+    <div class="phase-header" onclick="toggleGroup('comp')">
+      <span class="phase-icon">🗜️</span>
+      <span class="phase-label">Compression</span>
+      <span class="phase-count">Stage 7</span>
+      <svg class="phase-chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 6L8 9.5 11.5 6"/></svg>
+    </div>
+    <div class="phase-body">
+      <div class="stage-card" onclick="openDetail('s7')">
+        <div class="stage-id">Stage 7</div>
+        <div class="stage-name">Arithmetic Encoding</div>
+        <div class="stage-desc">Standard interval arithmetic coding (not rANS) on probability-weighted symbol stream. Encodes char-class stream and phonetic position-delta stream independently.</div>
+        <div class="stage-tags"><span class="tag tag-red">arithmetic</span><span class="tag tag-red">not rANS</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-connector">↓</div>
+
+  <!-- OUTPUT -->
+  <div class="phase-group phase-out" id="group-out">
+    <div class="phase-header" onclick="toggleGroup('out')">
+      <span class="phase-icon">📦</span>
+      <span class="phase-label">Output / Decoding</span>
+      <span class="phase-count">Stages 8 · 9</span>
+      <svg class="phase-chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 6L8 9.5 11.5 6"/></svg>
+    </div>
+    <div class="phase-body">
+      <div class="stage-card" onclick="openDetail('s8')">
+        <div class="stage-id">Stage 8</div>
+        <div class="stage-name">Decoding</div>
+        <div class="stage-desc">Full reverse pipeline. Reconstructs char_classes[] and pos_deltas[] from bitstreams. Inverts factoriadic delta encoding. Symbol slots re-spliced via anchor interpolation.</div>
+        <div class="stage-tags"><span class="tag tag-cyan">reverse</span><span class="tag tag-cyan">fidelity</span></div>
+      </div>
+      <div class="stage-card" onclick="openDetail('s9')">
+        <div class="stage-id">Stage 9</div>
+        <div class="stage-name">Word Joining & Autocorrect</div>
+        <div class="stage-desc">apply_morph() re-inflects roots. apply_case_flag() restores capitalization. _join_words() re-attaches punctuation. Autocorrect fixes quotes, hyphens, apostrophes, em-dashes.</div>
+        <div class="stage-tags"><span class="tag tag-cyan">morph</span><span class="tag tag-cyan">autocorrect</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-connector">↓</div>
+
+  <!-- METADATA -->
+  <div class="phase-group phase-meta" id="group-meta">
+    <div class="phase-header" onclick="toggleGroup('meta')">
+      <span class="phase-icon">🗃️</span>
+      <span class="phase-label">Metadata Codec</span>
+      <span class="phase-count">Stages 10 · 11 · 12</span>
+      <svg class="phase-chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 6L8 9.5 11.5 6"/></svg>
+    </div>
+    <div class="phase-body">
+      <div class="stage-card" onclick="openDetail('s10')">
+        <div class="stage-id">Stage 10</div>
+        <div class="stage-name">Compact Metadata Envelope</div>
+        <div class="stage-desc">Core Lexis-E innovation. Binary msgpack LEXI envelope with 23 typed field IDs. Large context fields zstd-compressed individually. 47–52% full-payload reduction vs main.</div>
+        <div class="stage-tags"><span class="tag tag-purple">−47% payload</span><span class="tag tag-purple">msgpack</span><span class="tag tag-purple">zstd</span></div>
+      </div>
+      <div class="stage-card" onclick="openDetail('s11')">
+        <div class="stage-id">Stage 11</div>
+        <div class="stage-name">Integration Tests</div>
+        <div class="stage-desc">Round-trip fidelity validation. char_stream_bpb checks. test_round_trip_pipeline.py verifies semantic equivalence of decoded output.</div>
+        <div class="stage-tags"><span class="tag tag-purple">round-trip</span><span class="tag tag-purple">validation</span></div>
+      </div>
+      <div class="stage-card" onclick="openDetail('s12')">
+        <div class="stage-id">Stage 12</div>
+        <div class="stage-name">End-to-End Benchmark</div>
+        <div class="stage-desc">eval_fineweb_bpb.py · scaling_test.py sweep across sizes and profiles. Full pipeline_trace.py green check. bpb measurement over Moby Dick and FineWeb corpora.</div>
+        <div class="stage-tags"><span class="tag tag-purple">benchmark</span><span class="tag tag-purple">FineWeb</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-connector">↓</div>
+  <div class="pipeline-node node-end">📄 .lexis File &nbsp;·&nbsp; 2.7523 bpb char-stream &nbsp;·&nbsp; 11.10 bpb full-payload</div>
+
+</div><!-- end pipeline-container -->
+</main>
+
+<!-- Overlay -->
+<div class="overlay" id="overlay" onclick="closeDetail()"></div>
+
+<!-- Detail panel -->
+<div class="detail-panel" id="detailPanel">
+  <div class="detail-header">
+    <div>
+      <div class="detail-stage-id" id="dpId"></div>
+      <div class="detail-stage-name" id="dpName"></div>
+    </div>
+    <button class="detail-close" onclick="closeDetail()" aria-label="Close">✕</button>
+  </div>
+  <div class="detail-body" id="dpBody"></div>
+</div>
+
+<script>
+// ── Theme toggle ──
+const html = document.documentElement;
+const themeBtn = document.getElementById('themeToggle');
+let dark = true;
+themeBtn.addEventListener('click', () => {
+  dark = !dark;
+  html.setAttribute('data-theme', dark ? 'dark' : 'light');
+  themeBtn.innerHTML = dark
+    ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg> Theme'
+    : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg> Theme';
+});
+
+// ── Collapse toggle ──
+function toggleGroup(id) {
+  document.getElementById('group-' + id).classList.toggle('collapsed');
+}
+
+// ── Stage data ──
+const stages = {
+  s1: {
+    id: 'Stage 1', name: 'Normalization',
+    desc: 'Strips BOM (U+FEFF), collapses multi-space and tab runs, normalizes line endings (CRLF→LF), maps typographic Unicode punctuation to ASCII equivalents, and clamps excessive blank lines.',
+    bullets: [
+      'BOM (U+FEFF) removal',
+      'Multi-space / tab collapse → single space',
+      'CRLF → LF normalization',
+      'Typographic quotes/dashes → ASCII equivalents',
+      'Sentence boundary detection',
+      'Excessive blank-line clamping'
+    ],
+    code: 'stage1_normalize(text) → normalized_text',
+    metrics: []
+  },
+  s1b: {
+    id: 'Stage 1b', name: 'Word Substitution',
+    desc: 'High-frequency English words that exceed a net-saving threshold are replaced with compact §W{n} tokens. A guard ensures substitution only occurs when it actually reduces byte count.',
+    bullets: [
+      'Frequency table built from document vocabulary',
+      '§W{n} tokens (compact, 4-6 bytes each)',
+      'Net-saving guard: substitution only if bytes saved > 0',
+      'Symbol table stored in Stage 10 metadata envelope'
+    ],
+    code: 'stage1b_word_substitution(text) → (text_with_tokens, symbol_table)',
+    metrics: []
+  },
+  s1c: {
+    id: 'Stage 1c', name: 'Symbol Slot Extraction',
+    desc: 'All §E (entity) and §W (word) tokens are stripped from the character stream. Their char offsets are recorded using anchor-based interpolation (every 200 clean chars, snapped to space boundaries) to enable drift-free splice-back at decode time.',
+    bullets: [
+      '§E / §W tokens stripped from char stream',
+      'Char offsets recorded per token',
+      'Anchor points every 200 clean chars, space-snapped',
+      'Nearest-anchor pair interpolation eliminates positional drift at 10k+ chars',
+      'Zero char-stream overhead — tokens never enter the encoded bitstream'
+    ],
+    code: 'stage1c_extract_slots(text) → (clean_text, slot_table)',
+    metrics: [{ label: 'Char-stream overhead', value: '0 bytes' }]
+  },
+  s2: {
+    id: 'Stage 2', name: 'Morphological Analysis',
+    desc: 'Each word is decomposed into a lemma root + an integer morphological transformation code. Codes cover inflection types (BASE, PLURAL, PAST_TENSE, GERUND, etc.). Achieves ~15.1% character reduction by encoding surface forms as (root, code) pairs.',
+    bullets: [
+      'lemminflect library for inflection',
+      'Transformation codes: BASE(0), PLURAL(1), PAST_TENSE(2), GERUND(3), COMPARATIVE(4), SUPERLATIVE(5), THIRD_PERSON(6), PAST_PARTICIPLE(7), ADVERB(8), NOUN_FROM_VERB(9)',
+      'Codes stored as packed integers — not the full surface form',
+      'Root lengths stored in Stage 10 metadata envelope'
+    ],
+    code: 'stage2_morphological_analysis(tokens) → [(root, code), ...]',
+    metrics: [{ label: 'Char reduction', value: '~15.1%' }]
+  },
+  s3: {
+    id: 'Stage 3', name: 'Syntactic Parsing',
+    desc: 'spaCy (en_core_web_trf transformer model, GPU-optional) produces Universal POS tags, dependency parse trees, sentence type classification, and voice detection (active/passive). Outputs used by Stage 6 structural context and Stage 5 POS Huffman coding.',
+    bullets: [
+      'Universal POS tags (NOUN, VERB, ADJ, ADV, …)',
+      'Dependency parse trees (nsubj, dobj, prep, …)',
+      'Sentence type: declarative / interrogative / imperative / exclamatory',
+      'Voice: active / passive',
+      'GPU acceleration via CuPy (optional, cupy-cuda12x)',
+      'POS tag sequences packed into Stage 10 metadata'
+    ],
+    code: 'stage3_syntactic_parsing(text) → doc (spaCy Doc)',
+    metrics: [{ label: 'Model', value: 'en_core_web_trf' }]
+  },
+  s4: {
+    id: 'Stage 4', name: 'Discourse Analysis',
+    desc: 'Coreference resolution via Longformer-based model identifies repeated named-entity mentions across the document. Cross-sentence entity chains are linked into symbolic references. Net-negative below ~800 bytes; increasingly beneficial above ~2,000 bytes.',
+    bullets: [
+      'Longformer coreference model (90.5M parameters)',
+      'fastcoref library for inference',
+      'Cross-sentence entity chain linking',
+      'Discourse threshold: net-negative < ~800 bytes, beneficial > ~2,000 bytes',
+      'GPU acceleration when available',
+      'Entity mentions replaced with §E{n} tokens'
+    ],
+    code: 'stage4_discourse_analysis(text, doc) → text_with_entity_tokens',
+    metrics: [
+      { label: 'Model params', value: '90.5M' },
+      { label: 'Break-even', value: '~2,000 bytes' }
+    ]
+  },
+  s5: {
+    id: 'Stage 5', name: 'Symbolic Encoding',
+    desc: 'Multi-part encoding stage. Characters are decomposed into (phonetic class, intra-class position, morphological role) triples — reducing delta magnitude by 2.42× vs flat IDs. Delta streams are encoded in the factorial number system (factoriadic). §E entity slots encoded via anchor-based splice offsets.',
+    bullets: [
+      'Phonetic decomposition: (class, position, morph_role) triples',
+      'Mixed-radix encoding reduces delta range',
+      'Factoriadic (factorial number system) for delta encoding',
+      'Compact for small, frequent steps in linguistically-constrained sequences',
+      '§E entity slot offsets encoded separately via splice table',
+      'POS tags Huffman-coded from Stage 3 output'
+    ],
+    code: 'stage5_symbolic_encode(roots, morph_codes, doc) → (char_classes, pos_deltas)',
+    metrics: [{ label: 'Delta magnitude reduction', value: '2.42×' }]
+  },
+  s5b: {
+    id: 'Stage 5b', name: 'Case Flag Encoding',
+    desc: 'Each token surface form is classified into one of four case categories. MIXED tokens additionally carry a per-character bitmap for lossless case restoration without storing raw uppercase characters in the char stream. Lexis-E applies a bug fix to the bit-indexing convention.',
+    bullets: [
+      'LOWER (0): all lowercase',
+      'TITLE (1): first char uppercase, rest lowercase',
+      'UPPER (2): all uppercase',
+      'MIXED (3): per-character bitmap, bit N ↔ char index N',
+      'Bug fix in Lexis-E: consistent bit N ↔ char index N in both compute_case_flag() and apply_case_flag()',
+      'Stored as packed integer array in Stage 10 metadata'
+    ],
+    code: 'compute_case_flag(surface) → (category, bitmap?)\napply_case_flag(root, category, bitmap?) → surface',
+    metrics: [{ label: 'Case categories', value: '4' }]
+  },
+  s6: {
+    id: 'Stage 6', name: 'Context-Mixing Model',
+    desc: 'Online 3-level context-mixing model trained exclusively on the document being compressed — no offline corpus. Mixes three evidence sources with adaptive Dirichlet-weighted blending. compact_mode applies top-K quantization to the context maps, cutting model weight size significantly.',
+    bullets: [
+      '3 evidence sources: char-context, morph-context, struct-context',
+      'Adaptive Dirichlet-weighted blending',
+      'Trained online on current document only — no prior training',
+      'compact_mode: top_k controls active context count, scale sharpens probabilities',
+      'Default profile k6s511: top_k=6, scale=511',
+      'Aggressive profile k6s127: top_k=6, scale=127 (better full-payload bpb)',
+      '4×4 grid sweep: k∈{3,4,5,6} × scale∈{127,255,511,1023}'
+    ],
+    code: 'stage6_probability_model(classes, deltas, metadata,\n  compact_mode=True, top_k=6, scale=511)\n  → probability_distributions',
+    metrics: [
+      { label: 'Default profile', value: 'k6s511' },
+      { label: 'char-stream bpb', value: '2.7523' }
+    ]
+  },
+  s7: {
+    id: 'Stage 7', name: 'Arithmetic Encoding',
+    desc: 'Standard interval arithmetic coding (not rANS) on the probability-weighted symbol stream from Stage 6. Encodes both the character class stream and the phonetic position-delta stream independently. Uses unigram count encoding for the delta stream.',
+    bullets: [
+      'Interval arithmetic coding (standard AC)',
+      'NOT rANS — important distinction',
+      'Char-class stream and pos-delta stream encoded independently',
+      'Unigram count encoding for delta stream',
+      'Runs on CPU (Stage 3/4 use GPU, Stage 7 does not)',
+      'Output: compressed bitstream stored in .lexis file'
+    ],
+    code: 'stage7_arithmetic_encode(probs, symbols) → compressed_bytes',
+    metrics: [{ label: 'Codec', value: 'Arithmetic (not rANS)' }]
+  },
+  s8: {
+    id: 'Stage 8', name: 'Decoding',
+    desc: 'Reconstructs char_classes[] and pos_deltas[] from the two compressed bitstreams using the serialized context model and metadata. Inverts the factoriadic delta encoding to restore phonetic (class, position) pairs, then looks up the inverse phonetic map to recover root characters.',
+    bullets: [
+      'Deserialize Stage 10 metadata envelope (LEXI binary format)',
+      'Reconstruct context model from stored weights',
+      'Decode char-class stream → char_classes[]',
+      'Decode pos-delta stream → pos_deltas[]',
+      'Invert factoriadic encoding to get (class, position) pairs',
+      'Inverse phonetic map lookup → root characters',
+      'Symbol slots re-spliced via anchor-based interpolation'
+    ],
+    code: 'stage8_decode(compressed_bytes, metadata) → (roots, morph_codes)',
+    metrics: []
+  },
+  s9: {
+    id: 'Stage 9', name: 'Word Joining & Autocorrect',
+    desc: 'apply_morph() restores inflected surface forms from (root, morph_code) pairs. apply_case_flag() restores capitalization from 4-category flags + MIXED bitmaps. _join_words() re-attaches punctuation using English-specific rules. Autocorrect fixes quote spacing, hyphenated compounds, apostrophe contractions, em-dash spacing, and bracket artifacts.',
+    bullets: [
+      'apply_morph(root, code) → surface form (lemminflect)',
+      'apply_case_flag(root, category, bitmap) → capitalized surface',
+      '_join_words() punctuation re-attachment rules',
+      'Autocorrect: quote spacing, hyphen compounds, apostrophe contractions',
+      'Autocorrect: em-dash spacing, bracket inner-space artifacts',
+      'Final output semantically equivalent to input (minor punctuation normalization at quote boundaries)'
+    ],
+    code: 'stage9_word_join(roots, codes, case_flags) → final_text',
+    metrics: [{ label: 'Fidelity', value: 'Semantic (not byte-exact)' }]
+  },
+  s10: {
+    id: 'Stage 10', name: 'Compact Metadata Envelope',
+    desc: 'Core Lexis-E innovation. Packs all metadata (POS tags, morph codes, root lengths, model weights, symbol table, case flags, context maps) into a field-ID + length-prefix LEXI binary envelope. 23 typed field IDs with per-field mode encoding. Large context fields are zstd-compressed individually.',
+    bullets: [
+      '23 typed field IDs with field-ID + length-prefix framing',
+      'msgpack binary serialisation for structured fields',
+      'char_context, morph_context, struct_context: zstd level-19 individually',
+      'Symbol table: compact integer-keyed msgpack map',
+      'Case flags: packed integer array',
+      'Root lengths: delta-encoded integer array',
+      'Full-payload bpb: 11.10 vs 23.38 on main branch (FineWeb 100k)'
+    ],
+    code: 'stage10_compact_encode(metadata) → lexi_bytes\nstage10_compact_decode(lexi_bytes) → metadata',
+    metrics: [
+      { label: 'Payload reduction vs main', value: '~47–52%' },
+      { label: 'full-payload bpb', value: '11.10' }
+    ]
+  },
+  s11: {
+    id: 'Stage 11', name: 'Integration Tests',
+    desc: 'Round-trip fidelity validation. char_stream_bpb checks. test_round_trip_pipeline.py verifies semantic equivalence of decoded output against original input.',
+    bullets: [
+      'test_round_trip_pipeline.py: full encode → decode → compare',
+      'Semantic equivalence check (not byte-exact)',
+      'char_stream_bpb validation against reference values',
+      'pipeline_trace.py: all 12 stages must return green',
+      'Validates compact_mode metadata round-trip fidelity'
+    ],
+    code: 'python test_round_trip_pipeline.py\npython pipeline_trace.py  # all stages green',
+    metrics: [{ label: 'Test coverage', value: '12 stages' }]
+  },
+  s12: {
+    id: 'Stage 12', name: 'End-to-End Benchmark',
+    desc: 'eval_fineweb_bpb.py and scaling_test.py sweep across sizes and profiles. Full pipeline_trace.py green check. bpb measurement over Moby Dick and FineWeb corpora.',
+    bullets: [
+      'eval_fineweb_bpb.py: FineWeb 100k char benchmark',
+      'scaling_test.py: 10k / 25k / 50k / 100k × both profiles',
+      'Sweep: k∈{3,4,5,6} × scale∈{127,255,511,1023} (16 profiles)',
+      'Wall-clock: 8m 56s real for both profiles × 4 sizes',
+      'Moby Dick + FineWeb corpora',
+      'Results: 2.7523 bpb char-stream, 11.10 bpb full-payload (FineWeb 100k, k6s511)'
+    ],
+    code: 'python eval_fineweb_bpb.py\ntime python scaling_test.py \\\n  --input fineweb_100k.txt \\\n  --sizes 10000 25000 50000 100000 \\\n  --compact-context --compact-profile both \\\n  --csv results.csv',
+    metrics: [
+      { label: 'char-stream bpb (FineWeb 100k)', value: '2.7523' },
+      { label: 'full-payload bpb (FineWeb 100k)', value: '11.10' },
+      { label: 'Wall-clock (8 runs)', value: '8m 56s' }
+    ]
+  }
+};
+
+function openDetail(id) {
+  const s = stages[id];
+  if (!s) return;
+  document.querySelectorAll('.stage-card').forEach(c => c.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+  document.getElementById('dpId').textContent = s.id;
+  document.getElementById('dpName').textContent = s.name;
+  let html = '';
+  html += `<div><div class="detail-section-title">Overview</div><div class="detail-description">${s.desc}</div></div>`;
+  if (s.bullets.length) {
+    html += `<div><div class="detail-section-title">Details</div><ul class="detail-bullets">${s.bullets.map(b=>`<li>${b}</li>`).join('')}</ul></div>`;
+  }
+  html += `<div><div class="detail-section-title">Function Signature</div><div class="detail-code">${s.code}</div></div>`;
+  if (s.metrics.length) {
+    html += `<div><div class="detail-section-title">Metrics</div>${s.metrics.map(m=>`<div class="detail-metric"><span class="detail-metric-label">${m.label}</span><span class="detail-metric-value">${m.value}</span></div>`).join('')}</div>`;
+  }
+  document.getElementById('dpBody').innerHTML = html;
+  document.getElementById('detailPanel').classList.add('open');
+  document.getElementById('overlay').classList.add('active');
+}
+
+function closeDetail() {
+  document.getElementById('detailPanel').classList.remove('open');
+  document.getElementById('overlay').classList.remove('active');
+  document.querySelectorAll('.stage-card').forEach(c => c.classList.remove('active'));
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetail(); });
+</script>
+</body>
+</html>
