@@ -5,7 +5,7 @@
 
 > If you use Lexis-E, please cite:
 >
-> Shasank Prasad. (2026). Lexis-E: Linguistically-Structured Hierarchical Text Compression and the Structural Compressibility of English. Zenodo.  https://zenodo.org/records/20776558
+> Shasank Prasad. (2026). Lexis-E: Linguistically-Structured Hierarchical Text Compression and the Structural Compressibility of English. Zenodo.  https://doi.org/10.5281/zenodo.20775690
 
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
