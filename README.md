@@ -1,6 +1,8 @@
 
 # Lexis-E (Efficient)
 
+Research Paper Publication at Zenodo: https://zenodo.org/records/20775691
+
 A linguistically-structured hierarchical text compressor for English, built as a research contribution to the [OpenAI Parameter Golf Challenge](https://github.com/openai/parameter-golf).
 
 Lexis-E achieves **2.7523 bpb char-stream on FineWeb at 100k chars** (default profile `k6s511`, compact_mode), outperforming gzip (3.3948 bpb) and zstd (3.1828 bpb) purely through explicit linguistic structure -- no learned weights, no training corpus. The "E" stands for **Efficient** -- Lexis-E exists to solve the metadata overhead problem of the main branch.
