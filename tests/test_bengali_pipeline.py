@@ -90,6 +90,36 @@ BENGALI_MIXED = "বাংলাদেশের জনসংখ্যা প্�
 
 
 # ---------------------------------------------------------------------------
+# _is_valid_bengali_map_char
+#
+# Helper used in Test 3 to validate every character in BENGALI_PHONETIC_CLASSES.
+#
+# The Bengali Unicode block is U+0980–U+09FF.  However the danda (।, U+0964)
+# and double-danda (॥, U+0965) are defined in the *Devanagari* block
+# (U+0900–U+097F) but are shared punctuation legitimately used in Bengali
+# text — both the Unicode Standard and the Government of India's Bengali
+# keyboard layout include them for Bengali writing.  Zero-Width Non-Joiner
+# (U+200C) and Zero-Width Joiner (U+200D) are also included as they are
+# required for correct conjunct rendering.
+# ---------------------------------------------------------------------------
+_BENGALI_BLOCK   = (0x0980, 0x09FF)   # core Bengali block
+_DEVANAGARI_BLOCK = (0x0900, 0x097F)  # dandas live here (U+0964, U+0965)
+_JOINERS = {"\u200c", "\u200d"}        # ZWNJ, ZWJ
+
+
+def _is_valid_bengali_map_char(ch: str) -> bool:
+    """True if *ch* is a character legitimately in BENGALI_PHONETIC_CLASSES."""
+    cp = ord(ch)
+    if _BENGALI_BLOCK[0] <= cp <= _BENGALI_BLOCK[1]:
+        return True
+    if _DEVANAGARI_BLOCK[0] <= cp <= _DEVANAGARI_BLOCK[1]:
+        # Only dandas (U+0964, U+0965) are expected; anything else in the
+        # Devanagari block would be a bug.
+        return cp in (0x0964, 0x0965)
+    return ch in _JOINERS
+
+
+# ---------------------------------------------------------------------------
 # Test 1: normalize_text preserves Bengali codepoints untouched
 # ---------------------------------------------------------------------------
 def test_normalize_preserves_bengali() -> None:
@@ -177,24 +207,31 @@ def test_phonetic_map_bengali() -> None:
     for digit, pos in [("০", 0), ("৫", 5), ("৯", 9)]:
         check(f"Bengali digit '{digit}' coords", get_bengali_coords(digit), (9, pos))
 
-    # Danda (।) → class 9, position 10
-    check("danda '।' coords", get_bengali_coords("।"), (9, 10))
+    # Danda (।, U+0964) → class 9, position 10
+    check("danda '।' (U+0964) coords", get_bengali_coords("।"), (9, 10))
+
+    # Double danda (॥, U+0965) → class 9, position 11
+    check("double danda '॥' (U+0965) coords", get_bengali_coords("॥"), (9, 11))
 
     # is_bengali() helper
     check_true("is_bengali('ক') → True", is_bengali("ক"))
     check_true("is_bengali('a') → False", not is_bengali("a"))
     check_true("is_bengali('') → False", not is_bengali(""))
 
-    # All chars inside every key of BENGALI_PHONETIC_CLASSES must be in the
-    # Bengali block (U+0980–U+09FF) or be a recognised joiner (ZWNJ/ZWJ).
-    # Keys like 'ড়' are multi-codepoint sequences (base + nukta U+09BC), so
-    # we check every character in the key, not just k[0].
-    _JOINERS = {"\u200c", "\u200d"}  # ZWNJ, ZWJ
-    all_in_block = all(
-        all("\u0980" <= ch <= "\u09ff" or ch in _JOINERS for ch in k)
-        for k in BENGALI_PHONETIC_CLASSES
+    # All characters in every BENGALI_PHONETIC_CLASSES key must be:
+    #   (a) in the Bengali block U+0980–U+09FF, OR
+    #   (b) danda / double-danda (U+0964–0965, shared Indic punctuation used
+    #       in Bengali writing but defined in the Devanagari block), OR
+    #   (c) ZWNJ / ZWJ (U+200C–U+200D) needed for conjunct rendering.
+    offenders = [
+        k for k in BENGALI_PHONETIC_CLASSES
+        if not all(_is_valid_bengali_map_char(ch) for ch in k)
+    ]
+    check(
+        "all BENGALI_PHONETIC_CLASSES keys are valid Bengali/Indic chars",
+        offenders,
+        [],
     )
-    check_true("all BENGALI_PHONETIC_CLASSES keys in Bengali block", all_in_block)
 
 
 # ---------------------------------------------------------------------------
@@ -282,9 +319,7 @@ def test_corpus_file() -> None:
     bengali_chars = [c for c in text if "\u0980" <= c <= "\u09ff"]
     check_true("corpus contains Bengali codepoints", len(bengali_chars) > 100)
 
-    # Spot-check words that are actually present in the corpus file verses.
-    # Note: 'গীতাঞ্জলি' appears only in BENGALI_SAMPLE (inline), not in the
-    # corpus file itself — so we check words drawn from the file's verses.
+    # Spot-check words drawn from the corpus file's actual verses.
     for word in ["আলো", "বাংলা", "প্রাণ", "সত্য"]:
         check_true(f"'{word}' found in corpus", word in text)
 
