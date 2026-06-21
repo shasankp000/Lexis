@@ -185,10 +185,13 @@ def test_phonetic_map_bengali() -> None:
     check_true("is_bengali('a') → False", not is_bengali("a"))
     check_true("is_bengali('') → False", not is_bengali(""))
 
-    # All entries in BENGALI_PHONETIC_CLASSES must be in block U+0980–U+09FF
-    # (multi-char keys like 'ড়' are sequences; check the first char only)
+    # All chars inside every key of BENGALI_PHONETIC_CLASSES must be in the
+    # Bengali block (U+0980–U+09FF) or be a recognised joiner (ZWNJ/ZWJ).
+    # Keys like 'ড়' are multi-codepoint sequences (base + nukta U+09BC), so
+    # we check every character in the key, not just k[0].
+    _JOINERS = {"\u200c", "\u200d"}  # ZWNJ, ZWJ
     all_in_block = all(
-        "\u0980" <= k[0] <= "\u09ff" or k in ("\u200c", "\u200d")
+        all("\u0980" <= ch <= "\u09ff" or ch in _JOINERS for ch in k)
         for k in BENGALI_PHONETIC_CLASSES
     )
     check_true("all BENGALI_PHONETIC_CLASSES keys in Bengali block", all_in_block)
@@ -279,8 +282,10 @@ def test_corpus_file() -> None:
     bengali_chars = [c for c in text if "\u0980" <= c <= "\u09ff"]
     check_true("corpus contains Bengali codepoints", len(bengali_chars) > 100)
 
-    # Spot-check: Gitanjali-specific words must appear
-    for word in ["গীতাঞ্জলি", "আলো", "বাংলা", "প্রাণ"]:
+    # Spot-check words that are actually present in the corpus file verses.
+    # Note: 'গীতাঞ্জলি' appears only in BENGALI_SAMPLE (inline), not in the
+    # corpus file itself — so we check words drawn from the file's verses.
+    for word in ["আলো", "বাংলা", "প্রাণ", "সত্য"]:
         check_true(f"'{word}' found in corpus", word in text)
 
     # Kaggle source URL must be in the header comments
