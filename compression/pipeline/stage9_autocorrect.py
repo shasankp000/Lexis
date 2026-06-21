@@ -14,6 +14,10 @@ Artifact classes targeted
 6. Apostrophe contractions:  "do n't"  ->  "don't"
 7. Collapsed whitespace   :  multiple spaces -> single space
    (guarded: '* * *' separators are preserved)
+
+For non-English languages (language != 'en'), all rules are skipped and
+the text is returned unchanged — the ASCII-centric regex patterns have
+no valid targets in scripts like Bengali.
 """
 
 from __future__ import annotations
@@ -41,17 +45,12 @@ _RULES: list[tuple[re.Pattern, str]] = [
     #     'word " ' -> 'word" '
     (re.compile(r'(\w) " '), r'\1" '),
     # 2c. Period+opening-quote glued to next word: 'end."next' -> 'end. "next'
-    #     _join_words glues '"' left after '.' (correct for closing quotes)
-    #     but when '"' is actually an opening quote for the next sentence
-    #     we need to re-insert the space between '"' and the following word.
     (re.compile(r'(\.")(\w)'), r'\1 \2'),
 
     # 3. Hyphenated compounds: 'whale - fish' -> 'whale-fish'
-    #    Guard: only between word characters, not list-item dashes.
     (re.compile(r'(?<=[\w]) - (?=[\w])'), '-'),
 
     # 4. Double-hyphen (ASCII em-dash from normalize_text): ' -- ' -> '--'
-    #    normalize_text maps em-dash -> '--', so restore tight spacing.
     (re.compile(r' -- '), '--'),
 
     # 5a. Opening bracket inner space: '( word' -> '(word'
@@ -64,13 +63,19 @@ _RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(\w) (n't|'s|'re|'ve|'ll|'d|'m|'em)\b"), r"\1\2"),
 
     # 7. Collapse multiple spaces to single space.
-    #    ('* * *' has been replaced by placeholder before this runs.)
     (re.compile(r'  +'), ' '),
 ]
 
 
-def autocorrect(text: str) -> str:
-    """Apply all correction rules in sequence and return the cleaned text."""
+def autocorrect(text: str, language: str = "en") -> str:
+    """Apply correction rules and return cleaned text.
+
+    For language != 'en' the function is a no-op: all rules are
+    ASCII-centric and have no valid targets in non-Latin scripts.
+    """
+    if language != "en":
+        return text.strip()
+
     # Protect '* * *' section separators before space-collapse.
     text = _STAR_SEP_RE.sub(_STAR_SEP_PLACEHOLDER, text)
 

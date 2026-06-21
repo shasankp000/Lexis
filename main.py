@@ -21,6 +21,7 @@ except Exception:
 
 from compression.alphabet.morph_codes import apply_morph
 from compression.alphabet.phonetic_map import PHONETIC_CLASSES
+from compression.alphabet.bengali_phonetic_map import BENGALI_PHONETIC_CLASSES
 from compression.alphabet.symbol_alphabet import SymbolAlphabet
 from compression.config import (
     CHAR_CONTEXT_SIZE,
@@ -46,6 +47,8 @@ from compression.pipeline.stage6_probability import ContextMixingModel
 from compression.pipeline.stage7_arithmetic import ArithmeticDecoder, ArithmeticEncoder
 from compression.pipeline.stage9_autocorrect import autocorrect
 from compression.pipeline.utils import chunk_text
+from compression.pipeline.bengali_morphology import BengaliMorphologicalAnalyser
+from compression.pipeline.bengali_encode import BengaliCharacterEncoder, BengaliJoiner, bengali_inverse_map
 
 _LEXI_ZSTD_MAGIC = b"LXZ1"
 _COMPACT_CONTEXT_PRESETS = {
@@ -93,7 +96,6 @@ def _quantize_counter(counter: Counter[int], top_k: int = 3, scale: int = 255) -
     quantized = {k: max(1, int(round((v / total) * scale))) for k, v in top}
     qsum = sum(quantized.values())
     if qsum != scale:
-        # Adjust the largest bucket to preserve target mass exactly.
         largest_key = max(quantized, key=quantized.get)
         quantized[largest_key] = max(1, quantized[largest_key] + (scale - qsum))
     return Counter(quantized)
@@ -117,7 +119,6 @@ def _compact_context_model(
         Counter,
         {k: _quantize_counter(v, top_k=top_k, scale=scale) for k, v in model.struct_context.items()},
     )
-    # Rebuild vocabs from compacted maps.
     symbols = set()
     for d in (model.char_context, model.morph_context, model.struct_context):
         for c in d.values():
@@ -154,10 +155,7 @@ def _get_nlp(model: str | None = None):
 def _run_discourse(text: str, device: str = "cpu") -> tuple[str, dict]:
     """
     Run Stage 4 (coreference resolution) + Stage 5 (symbol encoding).
-
-    Returns (compressed_text, symbol_table). The compressed_text has repeated
-    named-entity mentions replaced with §E{n} symbols. The symbol_table is
-    needed at decode time to restore the original text.
+    Returns (compressed_text, symbol_table).
     """
     analyser = DiscourseAnalyser(use_spacy=True, device=device)
     stage4_result = analyser.analyse_document(text)
@@ -166,41 +164,76 @@ def _run_discourse(text: str, device: str = "cpu") -> tuple[str, dict]:
 
 
 def _encode_for_model(
-    text: str, model: str | None = None
+    text: str,
+    model: str | None = None,
+    language: str = "en",
 ) -> tuple[list[dict], dict[str, int]]:
+    """Run morphology + syntax + character encoding for all sentences."""
+    if language == "bn":
+        analyser = BengaliMorphologicalAnalyser()
+        char_encoder = BengaliCharacterEncoder()
+        symbol_alphabet = SymbolAlphabet()
+        structural_encoder = StructuralEncoder(symbol_alphabet)
+
+        # Bengali: tokenise on whitespace; no spaCy sentence splitting needed.
+        sentences = text.split("\n") if "\n" in text else [text]
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+        sentence_data: list[tuple] = []
+        pos_sentences: list[list[str]] = []
+
+        for sent_text in sentences:
+            morphology = analyser.analyse_sentence(sent_text)
+            # Stub SyntaxResult: no POS tags, empty tree shape.
+            from compression.pipeline.stage3_syntax import SyntaxResult
+            syntax = SyntaxResult(
+                pos_tags=["X"] * len(morphology),
+                tree_shape="flat",
+                sentence_type="DECLARATIVE",
+                voice="ACTIVE",
+            )
+            sentence_data.append((morphology, syntax))
+            pos_sentences.append(syntax.pos_tags)
+
+        freq_table = structural_encoder.build_pos_frequency_table(pos_sentences)
+        encoded_sentences: list[dict] = [
+            char_encoder.encode_sentence_full(
+                morphology, syntax, structural_encoder, freq_table
+            )
+            for morphology, syntax in sentence_data
+        ]
+        return encoded_sentences, freq_table
+
+    # --- English path (unchanged) ---
     nlp = _get_nlp(model)
-    analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
+    analyser_en = MorphologicalAnalyser(use_spacy=True, model_name=model)
     symbol_alphabet = SymbolAlphabet()
     structural_encoder = StructuralEncoder(symbol_alphabet)
     char_encoder = CharacterEncoder()
 
     chunks = list(chunk_text(text))
-
-    sentence_data: list[tuple] = []
-    pos_sentences: list[list[str]] = []
+    sentence_data_en: list[tuple] = []
+    pos_sentences_en: list[list[str]] = []
 
     for i, chunk in enumerate(chunks):
         doc = nlp(chunk)
         sents = list(doc.sents)
         for sent in tqdm(sents, desc=f"Chunk {i + 1}/{len(chunks)}", unit="sent"):
             syntax = analyse_sentence(sent)
-            morphology = analyser.analyse_sentence(sent.text)
-            sentence_data.append((morphology, syntax))
-            pos_sentences.append(syntax.pos_tags)
+            morphology = analyser_en.analyse_sentence(sent.text)
+            sentence_data_en.append((morphology, syntax))
+            pos_sentences_en.append(syntax.pos_tags)
 
-    freq_table = structural_encoder.build_pos_frequency_table(pos_sentences)
-
-    encoded_sentences: list[dict] = []
-    for morphology, syntax in tqdm(
-        sentence_data, desc="Stage 5 — Encoding sentences", unit="sent"
-    ):
-        encoded_sentences.append(
-            char_encoder.encode_sentence_full(
-                morphology, syntax, structural_encoder, freq_table
-            )
+    freq_table_en = structural_encoder.build_pos_frequency_table(pos_sentences_en)
+    encoded_sentences_en: list[dict] = [
+        char_encoder.encode_sentence_full(
+            morphology, syntax, structural_encoder, freq_table_en
         )
-
-    return encoded_sentences, freq_table
+        for morphology, syntax in tqdm(
+            sentence_data_en, desc="Stage 5 — Encoding sentences", unit="sent"
+        )
+    ]
+    return encoded_sentences_en, freq_table_en
 
 
 def _summarise_pos_huffman(results: list[dict], freq_table: dict[str, int]) -> dict:
@@ -250,8 +283,13 @@ def _reconstruct_chars(
     class_stream: List[int],
     pos_deltas: List[int],
     sentence_char_counts: List[int],
+    language: str = "en",
 ) -> str:
-    inverse_map = {coords: char for char, coords in PHONETIC_CLASSES.items()}
+    if language == "bn":
+        inverse_map = bengali_inverse_map()
+    else:
+        inverse_map = {coords: char for char, coords in PHONETIC_CLASSES.items()}
+
     chars: List[str] = []
     idx = 0
 
@@ -304,7 +342,7 @@ def _flatten(nested: List[List[Any]]) -> List[Any]:
 
 _ATTACH_LEFT  = set(".,;:!?)'-—%-/")
 _ATTACH_RIGHT = set("($#/\"")
-_OPEN_QUOTE_AFTER = set("!?(\u2014 ")
+_OPEN_QUOTE_AFTER = set("!?(— ")
 
 
 def _join_words(words: list[str]) -> str:
@@ -349,7 +387,7 @@ def _join_words(words: list[str]) -> str:
     result = "".join(parts)
     result = result.replace("( ", "(").replace(" )", ")")
     result = result.replace("[ ", "[").replace(" ]", "]")
-    result = result.replace(" \u2014 ", "\u2014")
+    result = result.replace(" — ", "—")
     return result.strip()
 
 
@@ -421,7 +459,12 @@ def _build_encoded_sentences_from_metadata(payload: Dict[str, Any]) -> List[Dict
     return encoded
 
 
-def compress(text: str, output_path: str, model: str | None = None) -> Dict:
+def compress(
+    text: str,
+    output_path: str,
+    model: str | None = None,
+    language: str = "en",
+) -> Dict:
     """Run full available pipeline on text. Return stats."""
     normalized = normalize_text(text)
 
@@ -429,13 +472,19 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
     discourse_compressed, symbol_table = _run_discourse(normalized)
     print(f"[Stage 4+5] Symbols encoded: {len(symbol_table)}")
 
-    analyser   = MorphologicalAnalyser(use_spacy=True, model_name=model)
+    if language == "bn":
+        analyser = BengaliMorphologicalAnalyser()
+        encoder = BengaliCharacterEncoder()
+    else:
+        analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
+        encoder = CharacterEncoder()
+
     morphology = analyser.analyse_sentence(normalized)
+    stats = encoder.stats(normalized)
 
-    encoder = CharacterEncoder()
-    stats   = encoder.stats(normalized)
-
-    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
+    encoded_sentences, pos_freq_table = _encode_for_model(
+        normalized, model=model, language=language
+    )
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
     bpb_value = context_model.bpb(normalized, _EncodedPipeline(encoded_sentences))
@@ -447,6 +496,7 @@ def compress(text: str, output_path: str, model: str | None = None) -> Dict:
             for original, root, code in morphology
         ],
         "stats": stats,
+        "language": language,
         "stage6": {
             "bpb": bpb_value,
             "encoded_sentences": len(encoded_sentences),
@@ -473,16 +523,13 @@ def compress_to_file(
     compact_context_mode: bool = False,
     compact_context_top_k: int = 6,
     compact_context_scale: int = 511,
+    language: str = "en",
 ) -> Dict:
     """
     Full compression pipeline with arithmetic coding.
 
-    Writes a LEXI-envelope binary file (Option-B, field-id + length-prefix).
-    Stage 4+5 discourse symbol encoding runs on the normalised text to produce
-    a symbol_table.  The character/morphology pipeline encodes the *original
-    normalised text* (not the §-symbol version) because §E{n} tokens are
-    outside the phonetic alphabet.  The symbol_table is stored in the payload
-    and applied as the very last step in decompress().
+    Writes a LEXI-envelope binary file.  Language is stored in the
+    metadata so decompress() can reconstruct with the correct maps.
     """
     normalized = normalize_text(text)
 
@@ -496,7 +543,9 @@ def compress_to_file(
         f"({100*(orig_len-disc_len)/orig_len:.2f}% reduction)"
     )
 
-    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
+    encoded_sentences, pos_freq_table = _encode_for_model(
+        normalized, model=model, language=language
+    )
 
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
@@ -539,7 +588,7 @@ def compress_to_file(
     pos_deltas_stream = arith_enc.encode_unigram_counts(char_pos_deltas, pos_delta_counts)
 
     metadata = {
-        # bitstreams (raw bytes — not mode-encoded)
+        # bitstreams
         "compressed_bitstream":  compressed_bytes,
         "pos_deltas_bitstream":  pos_deltas_stream,
         # Stage 4+5
@@ -554,7 +603,7 @@ def compress_to_file(
         "pos_tags":              pos_tags,
         "morph_codes":           morph_codes,
         "root_lengths":          root_lengths,
-        # case restoration (new)
+        # case restoration
         "case_flags":            case_flags,
         "case_bitmaps":          case_bitmaps,
         # context model
@@ -569,9 +618,10 @@ def compress_to_file(
         "num_symbols":      len(char_classes),
         "num_char_classes": 7,
         "pos_freq_table":   pos_freq_table,
+        # language tag (used by decompress to choose decode path)
+        "language":         language,
     }
 
-    # --- encode with the new LEXI binary envelope (replaces msgpack) ---
     binary = encode_metadata(metadata)
     wrapped_binary, zstd_wrapped = _maybe_wrap_zstd(binary)
     Path(output_path).write_bytes(wrapped_binary)
@@ -591,6 +641,7 @@ def compress_to_file(
         "compact_context_scale":  int(compact_context_scale),
         "discourse_reduction_pct": round(100 * (orig_len - disc_len) / orig_len, 2)
                                    if orig_len else 0.0,
+        "language":               language,
     }
 
 
@@ -601,16 +652,15 @@ def decompress(input_path: str) -> str:
     payload: Dict[str, Any]
 
     if is_lexi_file(raw):
-        # --- new LEXI binary envelope ---
         payload = decode_metadata(raw)
     else:
-        # --- legacy msgpack / JSON fallback (read-only, never written) ---
         try:
             import msgpack  # type: ignore
             payload = msgpack.unpackb(raw, raw=False, strict_map_key=False)
         except Exception:
             payload = json.loads(raw.decode("utf-8"))
 
+    language: str = str(payload.get("language", "en"))
     symbol_table: dict = payload.get("symbol_table", {})
 
     if isinstance(payload, dict) and "compressed_bitstream" in payload:
@@ -637,8 +687,10 @@ def decompress(input_path: str) -> str:
         )
 
         sentence_counts = [int(c) for c in payload.get("sentence_char_counts", [])]
-        char_stream     = _reconstruct_chars(char_classes, pos_deltas, sentence_counts)
-        roots           = _split_roots(char_stream)
+        char_stream = _reconstruct_chars(
+            char_classes, pos_deltas, sentence_counts, language=language
+        )
+        roots = _split_roots(char_stream)
 
         morph_codes_flat  = _flatten(payload.get("morph_codes", []))
         case_flags_flat   = _flatten(payload.get("case_flags", []))
@@ -650,54 +702,74 @@ def decompress(input_path: str) -> str:
             flag       = case_flags_flat[idx]   if idx < len(case_flags_flat)   else 0
             bitmap     = case_bitmaps_flat[idx] if idx < len(case_bitmaps_flat) else 0
             surface    = apply_morph(root, morph_code)
-            words.append(apply_case_flag(surface, flag, bitmap))
+            if language == "bn":
+                # Bengali has no case restoration
+                words.append(surface)
+            else:
+                words.append(apply_case_flag(surface, flag, bitmap))
 
-        result = _join_words(words)
+        if language == "bn":
+            result = BengaliJoiner.join(words)
+        else:
+            result = _join_words(words)
 
         if symbol_table:
             result = decode_symbols(result, symbol_table)
 
-        return autocorrect(result)
+        return autocorrect(result, language=language)
 
     if isinstance(payload, dict) and "morphology" in payload:
         words = [
             apply_morph(entry["root"], entry["code"])
             for entry in payload.get("morphology", [])
         ]
-        result = _join_words(words)
-        result = result[0].upper() + result[1:] if result else result
+        if language == "bn":
+            result = BengaliJoiner.join(words)
+        else:
+            result = _join_words(words)
+            result = result[0].upper() + result[1:] if result else result
         if symbol_table:
             result = decode_symbols(result, symbol_table)
-        return autocorrect(result)
+        return autocorrect(result, language=language)
 
     return ""
 
 
-def analyse(text: str, model: str | None = None) -> None:
+def analyse(
+    text: str,
+    model: str | None = None,
+    language: str = "en",
+) -> None:
     """Run pipeline in analysis mode — print stats at each stage."""
     normalized = normalize_text(text)
 
-    print("[Stage 4+5] Running discourse analysis...")
-    discourse_compressed, symbol_table = _run_discourse(normalized)
-    orig_tokens = len(normalized.split())
-    comp_tokens = len(discourse_compressed.split())
-    print(f"[Stage 4+5] Symbols: {len(symbol_table)}")
-    print(
-        f"[Stage 4+5] Token reduction: {orig_tokens} \u2192 {comp_tokens} "
-        f"({100*(orig_tokens-comp_tokens)/orig_tokens:.2f}%)"
-    )
+    if language == "bn":
+        analyser = BengaliMorphologicalAnalyser()
+        encoder = BengaliCharacterEncoder()
+    else:
+        print("[Stage 4+5] Running discourse analysis...")
+        discourse_compressed, symbol_table = _run_discourse(normalized)
+        orig_tokens = len(normalized.split())
+        comp_tokens = len(discourse_compressed.split())
+        print(f"[Stage 4+5] Symbols: {len(symbol_table)}")
+        print(
+            f"[Stage 4+5] Token reduction: {orig_tokens} \u2192 {comp_tokens} "
+            f"({100*(orig_tokens-comp_tokens)/orig_tokens:.2f}%)"
+        )
+        analyser = MorphologicalAnalyser(use_spacy=True, model_name=model)
+        encoder = CharacterEncoder()
 
-    analyser   = MorphologicalAnalyser(use_spacy=True, model_name=model)
-    morph_stats = analyser.char_savings(normalized)
-
-    encoder      = CharacterEncoder()
+    morph_stats  = analyser.char_savings(normalized)
     encode_stats = encoder.stats(normalized)
 
-    encoded_sentences, pos_freq_table = _encode_for_model(normalized, model=model)
+    encoded_sentences, pos_freq_table = _encode_for_model(
+        normalized, model=model, language=language
+    )
     context_model = ContextMixingModel()
     context_model.train(encoded_sentences)
     bpb_value = context_model.bpb(normalized, _EncodedPipeline(encoded_sentences))
 
+    print(f"Language: {language}")
     print(f"Model: {model or SPACY_MODEL}")
     print(f"Context-mixing bpb: {bpb_value:.4f}")
 
@@ -746,6 +818,12 @@ def main() -> None:
     compress_parser.add_argument("output", help="Output binary file")
     compress_parser.add_argument("--model", default=None, help="spaCy model to use.")
     compress_parser.add_argument(
+        "--language",
+        choices=["en", "bn"],
+        default="en",
+        help="Source language (en=English, bn=Bengali). Default: en.",
+    )
+    compress_parser.add_argument(
         "--compact-context",
         action="store_true",
         help="Enable compact top-K quantized context maps for smaller metadata.",
@@ -771,10 +849,23 @@ def main() -> None:
 
     decompress_parser = subparsers.add_parser("decompress", help="Decompress archive")
     decompress_parser.add_argument("input", help="Input binary file")
+    # Language is read from metadata; no flag needed. Kept for user override.
+    decompress_parser.add_argument(
+        "--language",
+        choices=["en", "bn"],
+        default=None,
+        help="Override language detected from archive metadata.",
+    )
 
     analyse_parser = subparsers.add_parser("analyse", help="Analyse input text")
     analyse_parser.add_argument("input",  help="Input text file")
     analyse_parser.add_argument("--model", default=None)
+    analyse_parser.add_argument(
+        "--language",
+        choices=["en", "bn"],
+        default="en",
+        help="Source language. Default: en.",
+    )
 
     args = parser.parse_args()
 
@@ -791,6 +882,7 @@ def main() -> None:
             compact_context_mode=bool(args.compact_context),
             compact_context_top_k=top_k,
             compact_context_scale=scale,
+            language=args.language,
         )
         print(f"Wrote LEXI archive to {args.output}")
     elif args.command == "decompress":
@@ -798,7 +890,7 @@ def main() -> None:
         print(reconstructed)
     elif args.command == "analyse":
         text = _read_text(args.input)
-        analyse(text, model=args.model)
+        analyse(text, model=args.model, language=args.language)
 
 
 if __name__ == "__main__":
