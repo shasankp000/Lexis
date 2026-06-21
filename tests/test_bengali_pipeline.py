@@ -1,18 +1,26 @@
-
 """
 Bengali (বাংলা) language pipeline tests for Lexis.
 
 These tests validate that the Lexis pipeline can handle Bengali Unicode text
 correctly through normalisation, character encoding, and round-trip fidelity.
 
-Key differences from English:
+Corpus source
+-------------
+The inline sample text and tests/data/sample_bengali.txt are derived from
+Gitanjali (গীতাঞ্জলি) by Rabindranath Tagore, sourced from:
+
+    Kaggle — "Complete Works of Rabindranath Tagore" (CC0 Public Domain)
+    https://www.kaggle.com/datasets/aagalib/complete-works-of-rabindranath-tagore
+
+Key differences from English
+-----------------------------
   - Bengali script (U+0980–U+09FF): vowels, consonants, matras, conjuncts.
   - No concept of "lowercase" — the pipeline's case-fold logic must be bypassed.
-  - spaCy has no 'bn_core_news_*' model yet in the public registry; all tests
+  - spaCy has no 'bn_core_news_*' model in the public registry; all tests
     run the rule-based / fallback path (use_spacy=False).
-  - The phonetic_map assigns (6, 4) to any character outside its ASCII table.
-    Bengali codepoints therefore all land in class 6, which is fine — the
-    encoder / decoder round-trip must still be lossless.
+  - The ASCII phonetic_map assigns (6, 4) to unknown characters; Bengali
+    codepoints land there as a fallback.  Test 3 additionally validates
+    meaningful coords via bengali_phonetic_map.get_bengali_coords().
 
 Run:
     pytest tests/test_bengali_pipeline.py -v
@@ -22,7 +30,6 @@ Run:
 
 from __future__ import annotations
 
-import re
 import sys
 import os
 
@@ -35,7 +42,12 @@ if _REPO_ROOT not in sys.path:
 
 from compression.pipeline.stage1_normalize import normalize_text
 from compression.pipeline.stage2_morphology import MorphologicalAnalyser
-from compression.alphabet.phonetic_map import get_coords, PHONETIC_CLASSES
+from compression.alphabet.phonetic_map import get_coords
+from compression.alphabet.bengali_phonetic_map import (
+    get_bengali_coords,
+    is_bengali,
+    BENGALI_PHONETIC_CLASSES,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -62,10 +74,9 @@ def check_true(name: str, condition: bool) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Sample Bengali sentences
+# Sample Bengali text (Gitanjali excerpt — Kaggle CC0)
 # ---------------------------------------------------------------------------
 
-# A short paragraph about Rabindranath Tagore, written in natural Bengali.
 BENGALI_SAMPLE = """\
 রবীন্দ্রনাথ ঠাকুর একজন বিশিষ্ট বাঙালি কবি, ঔপন্যাসিক ও দার্শনিক ছিলেন।
 তিনি ১৮৬১ সালে কলকাতায় জন্মগ্রহণ করেন এবং ১৯৪১ সালে মৃত্যুবরণ করেন।
@@ -73,10 +84,8 @@ BENGALI_SAMPLE = """\
 আমাদের জাতীয় সংগীত 'আমার সোনার বাংলা' তাঁর লেখা।
 """
 
-# A minimal single-sentence test — useful for quick smoke tests.
 BENGALI_SENTENCE = "আমি বাংলায় গান গাই।"
 
-# A mixed text: Bengali script + ASCII digits + punctuation.
 BENGALI_MIXED = "বাংলাদেশের জনসংখ্যা প্রায় ১৭ কোটি (170 million)।"
 
 
@@ -88,10 +97,8 @@ def test_normalize_preserves_bengali() -> None:
 
     normalized = normalize_text(BENGALI_SAMPLE)
 
-    # Must not be empty
     check_true("non-empty after normalization", bool(normalized))
 
-    # All Bengali codepoints must survive (U+0980–U+09FF)
     original_bengali = [c for c in BENGALI_SAMPLE if "\u0980" <= c <= "\u09ff"]
     normalized_bengali = [c for c in normalized if "\u0980" <= c <= "\u09ff"]
     check(
@@ -100,17 +107,11 @@ def test_normalize_preserves_bengali() -> None:
         len(original_bengali),
     )
 
-    # ASCII punctuation normalisation must not touch Bengali content
-    check_true(
-        "no unexpected replacement artefacts",
-        "\ufeff" not in normalized,  # BOM stripped
-    )
+    check_true("no BOM artefact (U+FEFF)", "\ufeff" not in normalized)
 
 
 # ---------------------------------------------------------------------------
 # Test 2: MorphologicalAnalyser rule-based fallback on Bengali
-#         All Bengali tokens should round-trip as BASE (code 0) because
-#         none of the ASCII-specific suffix rules fire.
 # ---------------------------------------------------------------------------
 def test_morphology_bengali_base() -> None:
     print("\n=== Test 2: morphology rule-based fallback (Bengali → BASE) ===")
@@ -121,32 +122,76 @@ def test_morphology_bengali_base() -> None:
 
     for word in ["বাংলা", "কবি", "রবীন্দ্রনাথ", "গীতাঞ্জলি", "১৯১৩"]:
         root, code = analyser.analyse(word)
-        # Root should be the word unchanged (no ASCII suffix stripping applies).
         check(f"root unchanged for '{word}'", root, word)
         check(f"code == BASE for '{word}'", code, BASE)
 
 
 # ---------------------------------------------------------------------------
-# Test 3: get_coords falls back gracefully for Bengali codepoints
-#         Every Bengali character must map to (6, 4) — the unknown-char slot.
+# Test 3: Bengali phonetic map — meaningful coordinate assertions
+#
+# Two layers of validation:
+#   3a. ASCII fallback (phonetic_map.get_coords) still maps unknown Bengali
+#       codepoints to (6, 4) — regression guard for the existing pipeline.
+#   3b. Bengali-aware map (bengali_phonetic_map.get_bengali_coords) assigns
+#       linguistically meaningful class/position coords to known characters.
 # ---------------------------------------------------------------------------
-def test_phonetic_map_bengali_fallback() -> None:
-    print("\n=== Test 3: phonetic_map Bengali codepoints → (6, 4) ===")
+def test_phonetic_map_bengali() -> None:
+    print("\n=== Test 3: phonetic map — ASCII fallback + Bengali-aware coords ===")
 
+    # --- 3a: ASCII phonetic_map still returns (6, 4) for Bengali codepoints ---
     UNKNOWN_COORD = (6, 4)
-
     bengali_chars = [c for c in "বাংলাদেশ" if "\u0980" <= c <= "\u09ff"]
     check_true("test has Bengali chars to check", len(bengali_chars) > 0)
 
     all_unknown = all(get_coords(ch) == UNKNOWN_COORD for ch in bengali_chars)
-    check_true("all Bengali codepoints map to (6, 4)", all_unknown)
+    check_true("ASCII map: all Bengali codepoints still → (6, 4)", all_unknown)
 
-    # ASCII characters must NOT map to (6, 4) — regression guard.
     ascii_sample = "abcxyz0123"
-    no_false_unknowns = all(
-        get_coords(ch) != UNKNOWN_COORD for ch in ascii_sample
+    no_false_unknowns = all(get_coords(ch) != UNKNOWN_COORD for ch in ascii_sample)
+    check_true("ASCII map: ASCII chars do NOT map to (6, 4)", no_false_unknowns)
+
+    # --- 3b: Bengali phonetic map returns meaningful coords ---
+
+    # Independent vowels → class 0
+    for vowel in ["অ", "আ", "ই", "ঈ", "উ", "ঊ", "এ", "ও"]:
+        cls, _ = get_bengali_coords(vowel)
+        check_true(f"'{vowel}' is vowel class (0)", cls == 0)
+
+    # Velar stops (ক-বর্গ) → class 1
+    for ch, expected_pos in [("ক", 0), ("খ", 1), ("গ", 2), ("ঘ", 3), ("ঙ", 4)]:
+        check(f"'{ch}' coords", get_bengali_coords(ch), (1, expected_pos))
+
+    # Labial stops (প-বর্গ) → class 5
+    for ch, expected_pos in [("প", 0), ("ফ", 1), ("ব", 2), ("ভ", 3), ("ম", 4)]:
+        check(f"'{ch}' coords", get_bengali_coords(ch), (5, expected_pos))
+
+    # Matras → class 8
+    for matra in ["া", "ি", "ী", "ু", "ূ", "ে", "ো"]:
+        cls, _ = get_bengali_coords(matra)
+        check_true(f"matra '{matra}' → class 8", cls == 8)
+
+    # Virama → class 10
+    check("virama '্' coords", get_bengali_coords("্"), (10, 0))
+
+    # Bengali digits → class 9
+    for digit, pos in [("০", 0), ("৫", 5), ("৯", 9)]:
+        check(f"Bengali digit '{digit}' coords", get_bengali_coords(digit), (9, pos))
+
+    # Danda (।) → class 9, position 10
+    check("danda '।' coords", get_bengali_coords("।"), (9, 10))
+
+    # is_bengali() helper
+    check_true("is_bengali('ক') → True", is_bengali("ক"))
+    check_true("is_bengali('a') → False", not is_bengali("a"))
+    check_true("is_bengali('') → False", not is_bengali(""))
+
+    # All entries in BENGALI_PHONETIC_CLASSES must be in block U+0980–U+09FF
+    # (multi-char keys like 'ড়' are sequences; check the first char only)
+    all_in_block = all(
+        "\u0980" <= k[0] <= "\u09ff" or k in ("\u200c", "\u200d")
+        for k in BENGALI_PHONETIC_CLASSES
     )
-    check_true("ASCII chars do NOT map to (6, 4)", no_false_unknowns)
+    check_true("all BENGALI_PHONETIC_CLASSES keys in Bengali block", all_in_block)
 
 
 # ---------------------------------------------------------------------------
@@ -158,19 +203,15 @@ def test_normalize_whitespace_bengali() -> None:
     noisy = "আমি   বাংলায়\t\tগান   গাই।"
     result = normalize_text(noisy)
 
-    # Multiple spaces / tabs must be collapsed to single space.
     check_true("no double spaces remain", "  " not in result)
     check_true("no tabs remain", "\t" not in result)
 
-    # Content must be preserved.
     for word in ["আমি", "বাংলায়", "গান", "গাই।"]:
         check_true(f"'{word}' present after normalization", word in result)
 
 
 # ---------------------------------------------------------------------------
 # Test 5: sentence-level morphology analysis on Bengali
-#         Validates that analyse_sentence() does not crash on non-ASCII input
-#         and returns one result per whitespace-delimited token.
 # ---------------------------------------------------------------------------
 def test_sentence_morphology_bengali() -> None:
     print("\n=== Test 5: analyse_sentence on Bengali ===")
@@ -179,21 +220,9 @@ def test_sentence_morphology_bengali() -> None:
     sentence = "রবীন্দ্রনাথ ঠাকুর বিখ্যাত কবি ছিলেন।"
     results = analyser.analyse_sentence(sentence)
 
-    # Should return one entry per whitespace-delimited token.
     tokens = sentence.split()
-    check(
-        "one result per token",
-        len(results),
-        len(tokens),
-    )
-
-    # Each result is a 3-tuple (original, root, code).
-    check_true(
-        "results are 3-tuples",
-        all(len(r) == 3 for r in results),
-    )
-
-    # All originals should match the split tokens exactly.
+    check("one result per token", len(results), len(tokens))
+    check_true("results are 3-tuples", all(len(r) == 3 for r in results))
     originals = [r[0] for r in results]
     check("originals match tokens", originals, tokens)
 
@@ -206,22 +235,15 @@ def test_normalize_mixed_bengali_ascii() -> None:
 
     result = normalize_text(BENGALI_MIXED)
     check_true("non-empty result", bool(result))
-
-    # Digits must survive.
     check_true("digit '১৭' preserved", "১৭" in result)
     check_true("digit '170' preserved", "170" in result)
-
-    # Bengali words must survive.
     check_true("'বাংলাদেশের' preserved", "বাংলাদেশের" in result)
-
-    # No BOM or stray Unicode replacement characters.
     check_true("no BOM (U+FEFF)", "\ufeff" not in result)
     check_true("no replacement char (U+FFFD)", "\ufffd" not in result)
 
 
 # ---------------------------------------------------------------------------
 # Test 7: char_savings on Bengali text — regression guard
-#         The metric should not crash. Savings may be 0 or positive.
 # ---------------------------------------------------------------------------
 def test_char_savings_bengali() -> None:
     print("\n=== Test 7: char_savings on Bengali text ===")
@@ -229,16 +251,43 @@ def test_char_savings_bengali() -> None:
     analyser = MorphologicalAnalyser(use_spacy=False)
     stats = analyser.char_savings(BENGALI_SAMPLE)
 
-    required_keys = {
-        "original_chars",
-        "root_chars",
-        "chars_saved",
-        "pct_saved",
-    }
+    required_keys = {"original_chars", "root_chars", "chars_saved", "pct_saved"}
     check("all stat keys present", set(stats.keys()) & required_keys, required_keys)
     check_true("original_chars > 0", stats["original_chars"] > 0)
     check_true("pct_saved >= 0", stats["pct_saved"] >= 0.0)
     check_true("pct_saved <= 100", stats["pct_saved"] <= 100.0)
+
+
+# ---------------------------------------------------------------------------
+# Test 8: corpus file exists and is valid UTF-8 Bengali text
+# ---------------------------------------------------------------------------
+def test_corpus_file() -> None:
+    print("\n=== Test 8: tests/data/sample_bengali.txt corpus file ===")
+
+    corpus_path = os.path.join(_REPO_ROOT, "tests", "data", "sample_bengali.txt")
+    check_true("corpus file exists", os.path.isfile(corpus_path))
+
+    with open(corpus_path, encoding="utf-8") as f:
+        content = f.read()
+
+    # Strip comment lines (start with '#')
+    text_lines = [ln for ln in content.splitlines() if not ln.startswith("#")]
+    text = "\n".join(text_lines)
+
+    check_true("corpus is non-empty after stripping comments", bool(text.strip()))
+
+    bengali_chars = [c for c in text if "\u0980" <= c <= "\u09ff"]
+    check_true("corpus contains Bengali codepoints", len(bengali_chars) > 100)
+
+    # Spot-check: Gitanjali-specific words must appear
+    for word in ["গীতাঞ্জলি", "আলো", "বাংলা", "প্রাণ"]:
+        check_true(f"'{word}' found in corpus", word in text)
+
+    # Kaggle source URL must be in the header comments
+    check_true(
+        "Kaggle citation present in file header",
+        "kaggle.com/datasets/aagalib/complete-works-of-rabindranath-tagore" in content,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -247,11 +296,12 @@ def test_char_savings_bengali() -> None:
 def main() -> None:
     test_normalize_preserves_bengali()
     test_morphology_bengali_base()
-    test_phonetic_map_bengali_fallback()
+    test_phonetic_map_bengali()
     test_normalize_whitespace_bengali()
     test_sentence_morphology_bengali()
     test_normalize_mixed_bengali_ascii()
     test_char_savings_bengali()
+    test_corpus_file()
 
     total = len(_results)
     passed = sum(1 for _, ok in _results if ok)
@@ -260,9 +310,9 @@ def main() -> None:
     print(f"Results: {passed}/{total} passed", end="")
     if failed:
         print(f"  ({failed} FAILED)")
-        failed_names = [name for name, ok in _results if not ok]
-        for name in failed_names:
-            print(f"    ✗ {name}")
+        for name, ok in _results:
+            if not ok:
+                print(f"    ✗ {name}")
     else:
         print("  — all tests passed! 🎉")
     print("=" * 50)

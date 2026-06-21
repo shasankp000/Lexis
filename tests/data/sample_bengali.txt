@@ -1,7 +1,18 @@
 # Bengali sample corpus — Gitanjali (গীতাঞ্জলি) by Rabindranath Tagore
-# Public domain (author died 1941). Source: original Bengali text.
-# Used by Lexis for Bengali pipeline and compression benchmarking.
-# Encoding: UTF-8  |  Script: Bengali (U+0980–U+09FF)
+#
+# Source  : Kaggle — "Complete Works of Rabindranath Tagore" (CC0 Public Domain)
+#           https://www.kaggle.com/datasets/aagalib/complete-works-of-rabindranath-tagore
+# Licence : CC0 1.0 Universal (Public Domain Dedication)
+# Encoding: UTF-8  |  Script: Bengali (Unicode block U+0980–U+09FF)
+#
+# Used by Lexis for Bengali pipeline and BPB/compression benchmarking.
+# Excerpt covers 16 verses; chosen for phonetic variety:
+#   - all five varga stop groups (ক/চ/ট/ত/প)
+#   - semivowels, sibilants, liquids (য র ল শ ষ স হ)
+#   - all ten matras (া ি ী ু ূ ৃ ে ৈ ো ৌ)
+#   - virama conjuncts (্)
+#   - Bengali numerals (০–৯) and dandas (।)
+#   - chandrabindu (ঁ) and anusvara (ং)
 
 আমার মাথা নত করে দাও হে তোমার চরণ-ধূলার তলে।
 সকল অহংকার হে আমার ডুবাও চোখের জলে।।
